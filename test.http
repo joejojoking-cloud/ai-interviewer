@@ -1,0 +1,70 @@
+### 测试多轮对话接口
+POST http://127.0.0.1:8000/chat-with-history
+Content-Type: application/json
+
+{
+  "message": "我叫什么名字？",
+  "history":[
+    {
+      "role": "user",
+      "content": "你好，请记住我的名字叫张伟"
+    },
+    {
+      "role": "assistant",
+      "content": "你好，张伟！很高兴认识你～我会记住这个名字的 😊  \n有什么想聊的、需要帮忙的，或者想一起探讨的问题，随时告诉我哦！"
+    }
+  ]
+}
+### 测试面试官角色
+POST http://127.0.0.1:8000/chat-role
+Content-Type: application/json
+
+{
+  "message": "请用一个问题考察我的 Python 基础",
+  "history": [],
+  "role": "interviewer"
+}
+
+### 测试职业规划师角色
+POST http://127.0.0.1:8000/chat-role
+Content-Type: application/json
+
+{
+  "message": "我是传统行业转码的，现在很迷茫怎么办？",
+  "history": [],
+  "role": "career_coach"
+}
+### 上传简历
+POST http://127.0.0.1:8000/parse-resume
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+------WebKitFormBoundary
+Content-Disposition: form-data; name="file"; filename="test_resume.pdf"
+Content-Type: application/pdf
+
+< ./test_files/test_resume.pdf
+### 启动面试（用前面的解析结果）
+POST http://127.0.0.1:8000/start-interview
+Content-Type: application/json
+
+{
+  "resume_text": "张伟，传统行业本科，软件工程专业在读。做过 AI 模拟面试官项目，用 FastAPI + 通义千问。熟悉 Python，有两年后端开发经验。",
+  "jd_text": "AI 应用开发工程师，要求 Python 基础扎实，有 LLM 应用项目经验"
+}
+### 持久化会话 1：第一次问
+POST http://127.0.0.1:8000/chat-session
+Content-Type: application/json
+
+{
+  "session_id": "demo-001",
+  "message": "你好，我叫张伟，请记住"
+}
+
+### 持久化会话 2：第二次问（同一个 session_id）
+POST http://127.0.0.1:8000/chat-session
+Content-Type: application/json
+
+{
+  "session_id": "demo-001",
+  "message": "我叫什么名字？"
+}
