@@ -1,21 +1,34 @@
-### 测试多轮对话接口
+### =====================================================
+### AI 面试官 - 接口测试集（Day 3 回归测试版）
+### 使用方法：从第 1 个请求开始，依次点每个 ### 上面的
+### "Send Request" 链接。全部点完 = 回归测试通过。
+### =====================================================
+
+### 0. 根接口 - 服务是否活着
+GET http://127.0.0.1:8000/
+
+### 1. 简单聊天 - GET /chat
+GET http://127.0.0.1:8000/chat?message=你好，请用一句话介绍你自己
+
+### 2. 多轮对话 - POST /chat-with-history
 POST http://127.0.0.1:8000/chat-with-history
 Content-Type: application/json
 
 {
   "message": "我叫什么名字？",
-  "history":[
+  "history": [
     {
       "role": "user",
       "content": "你好，请记住我的名字叫张伟"
     },
     {
       "role": "assistant",
-      "content": "你好，张伟！很高兴认识你～我会记住这个名字的 😊  \n有什么想聊的、需要帮忙的，或者想一起探讨的问题，随时告诉我哦！"
+      "content": "你好，张伟！很高兴认识你～我会记住这个名字的 😊"
     }
   ]
 }
-### 测试面试官角色
+
+### 3. 面试官角色 - POST /chat-role
 POST http://127.0.0.1:8000/chat-role
 Content-Type: application/json
 
@@ -25,7 +38,7 @@ Content-Type: application/json
   "role": "interviewer"
 }
 
-### 测试职业规划师角色
+### 4. 职业规划师角色 - POST /chat-role
 POST http://127.0.0.1:8000/chat-role
 Content-Type: application/json
 
@@ -34,7 +47,8 @@ Content-Type: application/json
   "history": [],
   "role": "career_coach"
 }
-### 上传简历
+
+### 5. 上传简历 - POST /parse-resume
 POST http://127.0.0.1:8000/parse-resume
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
 
@@ -43,7 +57,9 @@ Content-Disposition: form-data; name="file"; filename="test_resume.pdf"
 Content-Type: application/pdf
 
 < ./test_files/test_resume.pdf
-### 启动面试（用前面的解析结果）
+------WebKitFormBoundary--
+
+### 6. 根据简历生成面试问题 - POST /start-interview
 POST http://127.0.0.1:8000/start-interview
 Content-Type: application/json
 
@@ -51,7 +67,8 @@ Content-Type: application/json
   "resume_text": "张伟，传统行业本科，软件工程专业在读。做过 AI 模拟面试官项目，用 FastAPI + 通义千问。熟悉 Python，有两年后端开发经验。",
   "jd_text": "AI 应用开发工程师，要求 Python 基础扎实，有 LLM 应用项目经验"
 }
-### 持久化会话 1：第一次问
+
+### 7. 持久化会话 1 - 第一次问（记住名字）
 POST http://127.0.0.1:8000/chat-session
 Content-Type: application/json
 
@@ -60,7 +77,7 @@ Content-Type: application/json
   "message": "你好，我叫张伟，请记住"
 }
 
-### 持久化会话 2：第二次问（同一个 session_id）
+### 8. 持久化会话 2 - 第二次问（同一个 session_id，AI 应记得）
 POST http://127.0.0.1:8000/chat-session
 Content-Type: application/json
 
@@ -68,3 +85,107 @@ Content-Type: application/json
   "session_id": "demo-001",
   "message": "我叫什么名字？"
 }
+
+### =====================================================
+### ✅ 回归测试通过后，继续测试 Day 3 任务 2：会话管理
+### =====================================================
+
+### 9. 手动创建一场会话（验证 create_session 工具函数）
+### ⚠️ 这个请求会先触发 /chat-session 存一条消息，但不会自动创建 sessions 记录
+### 所以我们用 Python 命令手动验证：
+### python -c "import main; main.create_session('test-s1', '测试面试'); print(main.list_sessions())"
+### 看到列表里有记录，说明 create_session + list_sessions 写对了 ✅
+
+### 10. 查看会话列表 - GET /sessions
+GET http://127.0.0.1:8000/sessions
+
+### 11. 删除会话 - DELETE /sessions/{session_id}
+### ⚠️ 先确保列表里有这个 session_id，再删
+DELETE http://127.0.0.1:8000/sessions/test-s1
+
+### =====================================================
+### ✅ 验证点：
+### - 第 10 步：/sessions 应返回 JSON 数组（可能为空 []，如果还没手动创建过）
+### - 第 11 步：删除成功后返回 {"deleted": "test-s1"}
+### - 删完后再查 /sessions，列表里应该没有 test-s1 了
+### =====================================================
+
+### =====================================================
+### Day 3 任务 3：简历信息自动识别
+### =====================================================
+
+### 12. 简历自动识别 - POST /analyze-resume
+POST http://127.0.0.1:8000/analyze-resume
+Content-Type: application/json
+
+{
+  "resume_text": "张伟，某高校，软件工程专业在读。技术栈：Python、FastAPI、SQLite、HTML/CSS。项目经验：1）AI 模拟面试官 - 用 FastAPI + 通义千问实现简历解析、多轮追问、评分报告，部署在阿里云。2）个人博客系统 - Django + MySQL，支持 Markdown 渲染。亮点：传统行业转码，有两年后端开发经验，自驱力强。"
+}
+
+### =====================================================
+### ✅ 验证点：
+### - 返回 {"parsed": {...}} 包含 basic / skills / projects / highlights
+### - basic 里有 name:"张伟"、school:"某高校"、major:"软件工程"
+### - skills 数组包含 Python、FastAPI 等
+### - projects 数组有 2 个项目
+### - highlights 数组有 3 个亮点
+### =====================================================
+
+### =====================================================
+### Day 3 任务 4：完整面试会话闭环（★ 项目灵魂）
+### 按顺序依次点 Send Request，记下 session_id
+### =====================================================
+
+### 13. 开始面试 - POST /interview/start
+POST http://127.0.0.1:8000/interview/start
+Content-Type: application/json
+
+{
+  "resume_text": "张伟，传统行业本科，软件工程专业在读。做过 AI 模拟面试官项目，用 FastAPI + 通义千问实现，包含简历解析、多轮追问、SQLite 存储。熟悉 Python、FastAPI、HTTP API 设计。",
+  "jd_text": "AI 应用开发工程师，要求 Python 基础扎实，有 LLM 应用项目经验",
+  "candidate_name": "张伟"
+}
+
+### ⬆️ 记下返回的 session_id（比如 interview-abc12345），替换下面所有的 session_id
+
+### 14. 候选人回答第 1 个问题（AI 应追问细节）
+POST http://127.0.0.1:8000/interview/chat
+Content-Type: application/json
+
+{
+  "session_id": "替换为上面返回的 session_id",
+  "answer": "我的项目里用 FastAPI 写了简历解析接口，能处理 PDF 和 Word，然后调通义千问生成面试问题。核心难点是流式输出和多轮追问的状态管理。"
+}
+
+### 15. 候选人回答第 2 轮（AI 应继续追问或推进）
+POST http://127.0.0.1:8000/interview/chat
+Content-Type: application/json
+
+{
+  "session_id": "替换为上面返回的 session_id",
+  "answer": "状态管理我用的 SQLite 存消息，每次请求读出来塞进 messages。不过简历和 JD 的上下文我没有每次都带上，这块以后可以优化。"
+}
+
+### 16. 查看会话列表（应该能看到这场面试记录）
+GET http://127.0.0.1:8000/sessions
+
+### 17. 结束面试（获取评分报告）
+POST http://127.0.0.1:8000/interview/chat
+Content-Type: application/json
+
+{
+  "session_id": "替换为上面返回的 session_id",
+  "answer": "我想结束了",
+  "is_finished": true
+}
+
+### =====================================================
+### ✅ 验证点：
+### - 第 13 步：返回 session_id + 开场白 + 第一个问题
+### - 第 14 步：追问应扣住"流式输出""状态管理"（不是随便问新问题）
+### - 第 15 步：追问应扣住"SQLite""上下文没带上"
+### - 第 16 步：/sessions 列表里有 "张伟 - 面试" 记录，msg_count > 0
+### - 第 17 步：返回 report 字段，包含：
+###   score.technical / score.communication / score.logic（0-100整数）
+###   strengths 数组、improvements 数组、overall_comment 字符串
+### =====================================================
