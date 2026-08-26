@@ -6,6 +6,7 @@ import sqlite3
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 from PyPDF2 import PdfReader
@@ -35,7 +36,7 @@ async def call_llm(messages: list, timeout: float = 120.0) -> str:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "qwen-plus",
+                "model": "qwen-max",
                 "messages": messages
             },
             timeout=timeout
@@ -464,7 +465,12 @@ async def interview_chat(req: InterviewChatRequest):
     # 构造追问 Prompt
     if req.is_finished:
         # 候选人想结束：输出结构化评分报告
-        prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告：
+        prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
+
+【重要铁律】
+- 评分和优点必须严格基于候选人在面试对话中的实际表现，不能凭简历推测
+- 如果候选人全程没有展示任何技术能力或有效回答，相关维度应打低分，优点应如实反映实际情况（如"态度坦诚"），不能编造未展示的能力
+- 简历仅供参考，不代表面试中的真实表现
 
 【岗位 JD】{jd_text[:500]}
 【面试历史】
@@ -523,3 +529,98 @@ async def interview_chat(req: InterviewChatRequest):
         }
 
     return {"session_id": req.session_id, "ai": ai_reply}
+
+
+@app.post("/interview/chat-stream")
+async def interview_chat_stream(req: InterviewChatRequest):
+    """SSE 流式版本的面试追问"""
+    history = load_history(req.session_id)
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT jd_text, resume_text FROM sessions WHERE session_id = ?",
+        (req.session_id,),
+    ).fetchone()
+    conn.close()
+
+    jd_text = row[0] if row else ""
+    resume_text = row[1] if row else ""
+    save_message(req.session_id, "user", req.answer)
+
+    if req.is_finished:
+        prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
+
+【重要铁律】
+- 评分和优点必须严格基于候选人在面试对话中的实际表现，不能凭简历推测
+- 如果候选人全程没有展示任何技术能力或有效回答，相关维度应打低分，优点应如实反映实际情况（如"态度坦诚"），不能编造未展示的能力
+- 简历仅供参考，不代表面试中的真实表现
+
+【岗位 JD】{jd_text[:500]}
+【面试历史】
+{format_history(history) + chr(10) + '候选人最后回答：' + req.answer}
+
+【输出格式】
+{{"score": {{"technical": 0, "communication": 0, "logic": 0}}, "strengths": ["优点1","优点2","优点3"], "improvements": ["不足1","不足2"], "overall_comment": "综合评语（3句话）"}}
+评分都是 0-100 的整数。只输出 JSON，不要输出其他文字。"""
+    else:
+        prompt = f"""你是面试官。候选人刚回答了你的问题，请根据他的回答追问。
+
+【岗位 JD】{jd_text[:500]}
+【候选人简历】
+{resume_text[:1200]}
+【面试历史（最近几轮）】
+{format_history(history[-6:])}
+【候选人本轮回答】
+{req.answer}
+【追问要求】
+1. 如果回答里有技术漏洞、含糊、没展开的细节 → 追着这个点问，问细节
+2. 如果回答很完整 → 推进到下一个相关问题（基于简历/JD）
+3. 问题要具体、有追问感，体现你真的听了他刚才说的话
+4. 只输出追问内容，不超过 80 字，不要寒暄"""
+
+    async def generate():
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "POST",
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {QWEN_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "qwen-max",
+                    "messages": [
+                        {"role": "system", "content": "你是专业的技术面试官，追问犀利但友好。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": True,
+                },
+                timeout=120,
+            ) as response:
+                full_reply = ""
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk["choices"][0]["delta"]
+                            if "content" in delta:
+                                text = delta["content"]
+                                full_reply += text
+                                yield f"data: {json.dumps({'text': text})}\n\n"
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+
+                # 流结束后，存完整回复到数据库
+                save_message(req.session_id, "assistant", full_reply)
+                yield f"data: {json.dumps({'done': True, 'full_reply': full_reply})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str):
+    """获取某场面试的所有消息"""
+    history = load_history(session_id, max_turns=100)
+    return {"session_id": session_id, "messages": history}
