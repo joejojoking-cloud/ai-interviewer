@@ -16,11 +16,11 @@ from docx import Document
 load_dotenv()
 
 # 从环境变量读取 API Key
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 
 # 检查 Key 是否存在
-if not QWEN_API_KEY:
-    raise ValueError("未找到 QWEN_API_KEY，请检查 .env 文件")
+if not LLM_API_KEY:
+    raise ValueError("未找到 LLM_API_KEY，请检查 .env 文件")
 
 
 async def call_llm(messages: list, timeout: float = 120.0) -> str:
@@ -30,13 +30,13 @@ async def call_llm(messages: list, timeout: float = 120.0) -> str:
     """
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "https://api.xiaomimimo.com/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {QWEN_API_KEY}",
+                "Authorization": f"Bearer {LLM_API_KEY}",
                 "Content-Type": "application/json"
             },
             json={
-                "model": "qwen-max",
+                "model": "mimo-v2.5-pro",
                 "messages": messages
             },
             timeout=timeout
@@ -189,15 +189,15 @@ async def call_llm_with_tools(messages: list, tools: list = None,
     tool_calls_log = []
 
     for _ in range(5):
-        payload = {"model": "qwen-max", "messages": messages}
+        payload = {"model": "mimo-v2.5-pro", "messages": messages}
         if tools:
             payload["tools"] = tools
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                "https://api.xiaomimimo.com/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {QWEN_API_KEY}",
+                    "Authorization": f"Bearer {LLM_API_KEY}",
                     "Content-Type": "application/json"
                 },
                 json=payload,
@@ -206,7 +206,7 @@ async def call_llm_with_tools(messages: list, tools: list = None,
             result = response.json()
 
         if "choices" not in result:
-            raise ValueError(f"通义千问返回异常: {result}")
+            raise ValueError(f"MiMo API 返回异常: {result}")
 
         message = result["choices"][0]["message"]
 
