@@ -3,8 +3,9 @@ import io
 import json
 import uuid
 import sqlite3
+import threading
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -24,10 +25,7 @@ if not LLM_API_KEY:
 
 
 async def call_llm(messages: list, timeout: float = 120.0) -> str:
-    """
-    调用通义千问的公共函数。所有接口都复用这一个。
-    传入完整的 messages 列表，返回 AI 的文字回复。
-    """
+    """调用 MiMo LLM，返回文字回复。"""
     async with httpx.AsyncClient() as client:
         response = await client.post(
             "https://api.xiaomimimo.com/v1/chat/completions",
@@ -41,10 +39,15 @@ async def call_llm(messages: list, timeout: float = 120.0) -> str:
             },
             timeout=timeout
         )
+        if response.status_code == 401:
+            raise HTTPException(status_code=500, detail="LLM API Key 无效或已过期")
+        if response.status_code == 429:
+            raise HTTPException(status_code=503, detail="LLM API 限流，请稍后重试")
+        if response.status_code >= 500:
+            raise HTTPException(status_code=502, detail=f"LLM API 服务异常: {response.status_code}")
         result = response.json()
-        # 注意：这里加了错误处理，防止返回异常时报"看不懂"的错误
         if "choices" not in result:
-            raise ValueError(f"通义千问返回异常: {result}")
+            raise HTTPException(status_code=502, detail=f"LLM API 返回格式异常: {str(result)[:200]}")
         return result["choices"][0]["message"]["content"]
 
 
@@ -203,10 +206,16 @@ async def call_llm_with_tools(messages: list, tools: list = None,
                 json=payload,
                 timeout=timeout
             )
+            if response.status_code == 401:
+                raise HTTPException(status_code=500, detail="LLM API Key 无效或已过期")
+            if response.status_code == 429:
+                raise HTTPException(status_code=503, detail="LLM API 限流，请稍后重试")
+            if response.status_code >= 500:
+                raise HTTPException(status_code=502, detail=f"LLM API 服务异常: {response.status_code}")
             result = response.json()
 
         if "choices" not in result:
-            raise ValueError(f"MiMo API 返回异常: {result}")
+            raise HTTPException(status_code=502, detail=f"LLM API 返回格式异常: {str(result)[:200]}")
 
         message = result["choices"][0]["message"]
 
@@ -318,7 +327,9 @@ def parse_pdf(content: bytes) -> str:
     reader = PdfReader(io.BytesIO(content))
     text = ""
     for page in reader.pages:
-        text += page.extract_text() + "\n"
+        page_text = page.extract_text()
+        if page_text:  # 扫描版 PDF 的 extract_text() 可能返回 None
+            text += page_text + "\n"
     return text.strip()
 
 
@@ -384,82 +395,78 @@ async def start_interview(req: InterviewStartRequest):
 
 DB_PATH = "interviewer.db"
 
+# 模块级连接 + 线程锁，解决 SQLite 并发写入问题
+_db_lock = threading.Lock()
+_db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+_db_conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式支持并发读写
+
 
 def init_db():
     """启动时建表（如果不存在）"""
-    conn = sqlite3.connect(DB_PATH)
-
-    # 会话表：记录每场面试的基本信息
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL DEFAULT '未命名面试',
-            jd_text TEXT DEFAULT '',
-            resume_text TEXT DEFAULT '',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # 消息表：记录每场面试里的对话（Day 2 的）
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with _db_lock:
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL DEFAULT '未命名面试',
+                jd_text TEXT DEFAULT '',
+                resume_text TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        _db_conn.commit()
 
 
 def save_message(session_id: str, role: str, content: str):
     """存一条消息"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content),
-    )
-    conn.commit()
-    conn.close()
+    with _db_lock:
+        _db_conn.execute(
+            "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
+            (session_id, role, content),
+        )
+        _db_conn.commit()
 
 
-def load_history(session_id: str, max_turns: int = 10) -> list:
+def load_history(session_id: str, max_turns: int = 100) -> list:
     """从数据库读最近的对话历史"""
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute(
-        "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-        (session_id, max_turns * 2),
-    ).fetchall()
-    conn.close()
+    with _db_lock:
+        rows = _db_conn.execute(
+            "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+            (session_id, max_turns * 2),
+        ).fetchall()
     return [{"role": role, "content": content} for role, content in reversed(rows)]
 
 
 def create_session(session_id: str, name: str = "未命名面试",
                    jd_text: str = "", resume_text: str = ""):
     """创建一场面试会话"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT OR IGNORE INTO sessions (session_id, name, jd_text, resume_text) VALUES (?, ?, ?, ?)",
-        (session_id, name, jd_text, resume_text),
-    )
-    conn.commit()
-    conn.close()
+    with _db_lock:
+        _db_conn.execute(
+            "INSERT OR IGNORE INTO sessions (session_id, name, jd_text, resume_text) VALUES (?, ?, ?, ?)",
+            (session_id, name, jd_text, resume_text),
+        )
+        _db_conn.commit()
 
 
 def list_sessions() -> list:
     """列出所有面试会话（按时间倒序）"""
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("""
-        SELECT session_id, name, jd_text, created_at,
-               (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.session_id) as msg_count
-        FROM sessions
-        ORDER BY created_at DESC
-    """).fetchall()
-    conn.close()
+    with _db_lock:
+        rows = _db_conn.execute("""
+            SELECT session_id, name, jd_text, created_at,
+                   (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.session_id) as msg_count
+            FROM sessions
+            ORDER BY created_at DESC
+        """).fetchall()
     return [
         {"session_id": r[0], "name": r[1], "jd_text": r[2], "created_at": r[3], "msg_count": r[4]}
         for r in rows
@@ -468,11 +475,22 @@ def list_sessions() -> list:
 
 def delete_session(session_id: str):
     """删除一场面试（连带它的所有消息）"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-    conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-    conn.commit()
-    conn.close()
+    with _db_lock:
+        _db_conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        _db_conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        _db_conn.commit()
+
+
+def get_session_info(session_id: str) -> dict | None:
+    """获取单个会话信息"""
+    with _db_lock:
+        row = _db_conn.execute(
+            "SELECT jd_text, resume_text FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {"jd_text": row[0], "resume_text": row[1]}
 
 
 def format_history(history: list) -> str:
@@ -502,8 +520,9 @@ async def summarize_history(history: list) -> str:
     try:
         summary = await call_llm([{"role": "user", "content": prompt}], timeout=30)
         return f"【早期对话摘要】{summary}"
-    except Exception:
-        return ""
+    except Exception as e:
+        # 摘要失败时返回明确提示，而不是空字符串
+        return f"【早期对话摘要生成失败：{type(e).__name__}，请基于最近对话内容继续】"
 
 
 init_db()  # 服务启动时执行一次，建好表
@@ -655,22 +674,16 @@ class InterviewChatRequest(BaseModel):
 @app.post("/interview/chat")
 async def interview_chat(req: InterviewChatRequest):
     """继续面试：AI 根据候选人的回答进行追问"""
-    # 从数据库读出这场面试的全部历史 + 简历 + JD
+    # 检查 session 是否存在
+    session_info = get_session_info(req.session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail=f"会话 {req.session_id} 不存在")
+
     history = load_history(req.session_id)
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT jd_text, resume_text FROM sessions WHERE session_id = ?",
-        (req.session_id,),
-    ).fetchone()
-    conn.close()
+    jd_text = session_info["jd_text"]
+    resume_text = session_info["resume_text"]
 
-    jd_text = row[0] if row else ""
-    resume_text = row[1] if row else ""
-
-    # 先把候选人这轮的答案存进去
-    save_message(req.session_id, "user", req.answer)
-
-    # 构造追问 Prompt
+    # 构造追问 Prompt（先不存消息，等 LLM 返回后再存）
     if req.is_finished:
         # 候选人想结束：输出结构化评分报告
         prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
@@ -748,6 +761,8 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
     )
     ai_reply = result["content"]
 
+    # LLM 成功后再存消息（避免 LLM 失败时留下孤儿数据）
+    save_message(req.session_id, "user", req.answer)
     save_message(req.session_id, "assistant", ai_reply)
 
     # 结束面试时，解析评分报告 JSON
@@ -774,17 +789,14 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
 @app.post("/interview/chat-stream")
 async def interview_chat_stream(req: InterviewChatRequest):
     """SSE 流式版本的面试追问（Agent 模式：先执行工具，再流式输出）"""
-    history = load_history(req.session_id)
-    conn = sqlite3.connect(DB_PATH)
-    row = conn.execute(
-        "SELECT jd_text, resume_text FROM sessions WHERE session_id = ?",
-        (req.session_id,),
-    ).fetchone()
-    conn.close()
+    # 检查 session 是否存在
+    session_info = get_session_info(req.session_id)
+    if not session_info:
+        raise HTTPException(status_code=404, detail=f"会话 {req.session_id} 不存在")
 
-    jd_text = row[0] if row else ""
-    resume_text = row[1] if row else ""
-    save_message(req.session_id, "user", req.answer)
+    history = load_history(req.session_id)
+    jd_text = session_info["jd_text"]
+    resume_text = session_info["resume_text"]
 
     if req.is_finished:
         prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
@@ -851,13 +863,17 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
     )
     final_reply = agent_result["content"]
 
-    # 把 Agent 的最终回复存进数据库
+    # LLM 成功后再存消息
+    save_message(req.session_id, "user", req.answer)
     save_message(req.session_id, "assistant", final_reply)
 
-    # 流式推送给前端（逐字效果）
+    # 流式推送给前端（按词推送，比逐字符高效）
     async def generate():
-        for char in final_reply:
-            yield f"data: {json.dumps({'text': char})}\n\n"
+        words = list(final_reply)  # 中文按字分割
+        chunk_size = 3  # 每次推 3 个字
+        for i in range(0, len(words), chunk_size):
+            chunk = "".join(words[i:i + chunk_size])
+            yield f"data: {json.dumps({'text': chunk})}\n\n"
         yield f"data: {json.dumps({'done': True, 'full_reply': final_reply, 'tool_calls': agent_result['tool_calls_log']})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
