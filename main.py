@@ -119,6 +119,8 @@ def tool_search_resume(keyword: str, resume_text: str) -> str:
     """从简历中搜索包含关键词的段落"""
     if not resume_text:
         return "简历内容为空，无法搜索。"
+    if not keyword or not keyword.strip():
+        return "关键词为空，无法搜索。请提供具体的项目名或技术名。"
     # 按行分割，找包含关键词的行及其上下文
     lines = resume_text.split("\n")
     matched = []
@@ -226,14 +228,18 @@ async def call_llm_with_tools(messages: list, tools: list = None,
 
         for tc in message["tool_calls"]:
             func_name = tc["function"]["name"]
-            func_args = json.loads(tc["function"]["arguments"])
+            try:
+                func_args = json.loads(tc["function"]["arguments"])
+            except (json.JSONDecodeError, KeyError):
+                func_args = {}
 
             if func_name == "search_resume":
-                result_text = tool_search_resume(func_args["keyword"], resume_text)
+                keyword = func_args.get("keyword", "")
+                result_text = tool_search_resume(keyword, resume_text) if keyword else "关键词为空，无法搜索。"
             elif func_name == "evaluate_answer":
-                result_text = tool_evaluate_answer(func_args["answer"], func_args["criteria"])
+                result_text = tool_evaluate_answer(func_args.get("answer", ""), func_args.get("criteria", ""))
             elif func_name == "generate_report":
-                result_text = tool_generate_report(func_args["history_summary"])
+                result_text = tool_generate_report(func_args.get("history_summary", ""))
             else:
                 result_text = f"未知工具：{func_name}"
 
@@ -685,6 +691,8 @@ async def interview_chat(req: InterviewChatRequest):
 
     # 构造追问 Prompt（先不存消息，等 LLM 返回后再存）
     if req.is_finished:
+        # 把用户回答加到 history 里，让 Prompt 里的历史是完整的
+        history = history + [{"role": "user", "content": req.answer}]
         # 候选人想结束：输出结构化评分报告
         prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
 
@@ -695,7 +703,7 @@ async def interview_chat(req: InterviewChatRequest):
 
 【岗位 JD】{jd_text[:500]}
 【面试历史】
-{format_history(history) + chr(10) + '候选人最后回答：' + req.answer}
+{format_history(history)}
 
 【输出格式】
 {{
@@ -799,6 +807,7 @@ async def interview_chat_stream(req: InterviewChatRequest):
     resume_text = session_info["resume_text"]
 
     if req.is_finished:
+        history = history + [{"role": "user", "content": req.answer}]
         prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
 
 【重要铁律】
@@ -808,7 +817,7 @@ async def interview_chat_stream(req: InterviewChatRequest):
 
 【岗位 JD】{jd_text[:500]}
 【面试历史】
-{format_history(history) + chr(10) + '候选人最后回答：' + req.answer}
+{format_history(history)}
 
 【输出格式】
 {{"score": {{"technical": 0, "communication": 0, "logic": 0}}, "strengths": ["优点1","优点2","优点3"], "improvements": ["不足1","不足2"], "overall_comment": "综合评语（3句话）"}}
