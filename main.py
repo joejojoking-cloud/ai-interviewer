@@ -48,6 +48,192 @@ async def call_llm(messages: list, timeout: float = 120.0) -> str:
         return result["choices"][0]["message"]["content"]
 
 
+# ═══════════════════════════════════════════════════════
+#  Agent 工具层：让面试官从"裸 LLM"变成"有工具的 Agent"
+# ═══════════════════════════════════════════════════════
+
+# 工具 schema（OpenAI Function Calling 格式）
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_resume",
+            "description": "根据关键词搜索候选人简历中的相关段落。当候选人提到某个项目、技术或经历时，用这个工具获取简历中的详细信息，以便追问细节。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "搜索关键词，如项目名、技术名（例如：秒杀、FastAPI、Redis）"
+                    }
+                },
+                "required": ["keyword"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "evaluate_answer",
+            "description": "评估候选人当前回答的质量。当需要判断回答深度、决定是追问还是推进时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "候选人的回答内容"
+                    },
+                    "criteria": {
+                        "type": "string",
+                        "description": "评估标准，如：技术深度、逻辑清晰度、实战经验"
+                    }
+                },
+                "required": ["answer", "criteria"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_report",
+            "description": "面试结束时，根据整场对话生成结构化评分报告。仅在候选人明确表示结束面试或对话已充分展开时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "history_summary": {
+                        "type": "string",
+                        "description": "整场面试的对话摘要"
+                    }
+                },
+                "required": ["history_summary"]
+            }
+        }
+    }
+]
+
+
+def tool_search_resume(keyword: str, resume_text: str) -> str:
+    """从简历中搜索包含关键词的段落"""
+    if not resume_text:
+        return "简历内容为空，无法搜索。"
+    # 按行分割，找包含关键词的行及其上下文
+    lines = resume_text.split("\n")
+    matched = []
+    for i, line in enumerate(lines):
+        if keyword.lower() in line.lower():
+            # 取匹配行及前后各 1 行作为上下文
+            start = max(0, i - 1)
+            end = min(len(lines), i + 2)
+            context = "\n".join(lines[start:end])
+            matched.append(context)
+    if matched:
+        return f"找到 {len(matched)} 处匹配「{keyword}」：\n" + "\n---\n".join(matched[:3])
+    return f"简历中未找到与「{keyword}」相关的内容。"
+
+
+def tool_evaluate_answer(answer: str, criteria: str) -> str:
+    """评估候选人回答的质量（本地规则 + 启发式）"""
+    score = 50  # 基准分
+    reasons = []
+
+    # 长度评估
+    if len(answer) > 200:
+        score += 10
+        reasons.append("回答较详细")
+    elif len(answer) < 30:
+        score -= 15
+        reasons.append("回答过于简短")
+
+    # 技术关键词密度
+    tech_keywords = ["架构", "性能", "优化", "设计", "实现", "原理", "底层",
+                     "并发", "缓存", "数据库", "算法", "复杂度", "分布式",
+                     "测试", "部署", "监控", "日志", "异常", "容错"]
+    tech_count = sum(1 for kw in tech_keywords if kw in answer)
+    if tech_count >= 3:
+        score += 15
+        reasons.append(f"包含 {tech_count} 个技术关键词")
+    elif tech_count == 0:
+        score -= 10
+        reasons.append("缺少技术深度词汇")
+
+    # 结构化表达
+    if any(marker in answer for marker in ["首先", "其次", "最后", "第一", "第二", "1.", "2."]):
+        score += 10
+        reasons.append("回答有条理")
+
+    # 不知道/不了解
+    if any(phrase in answer for phrase in ["不知道", "不了解", "没做过", "不清楚"]):
+        score -= 20
+        reasons.append("坦诚承认不了解")
+
+    score = max(0, min(100, score))
+    return json.dumps({"score": score, "reasons": reasons, "criteria": criteria}, ensure_ascii=False)
+
+
+def tool_generate_report(history_summary: str) -> str:
+    """返回提示，让 LLM 基于历史生成报告"""
+    return (
+        f"请根据以下面试摘要生成 JSON 评分报告：\n{history_summary}\n"
+        "输出格式：{\"score\":{\"technical\":0,\"communication\":0,\"logic\":0},"
+        "\"strengths\":[\"...\"],\"improvements\":[\"...\"],\"overall_comment\":\"...\"}"
+    )
+
+
+async def call_llm_with_tools(messages: list, tools: list = None,
+                               resume_text: str = "", timeout: float = 120.0) -> dict:
+    """
+    支持 Function Calling 的 LLM 调用。
+    自动处理工具调用循环：LLM 返回 tool_calls → 执行工具 → 结果喂回 → 直到生成最终回复。
+    返回 {"content": str, "tool_calls_log": list}
+    """
+    tool_calls_log = []
+
+    for _ in range(5):
+        payload = {"model": "qwen-max", "messages": messages}
+        if tools:
+            payload["tools"] = tools
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {QWEN_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=timeout
+            )
+            result = response.json()
+
+        if "choices" not in result:
+            raise ValueError(f"通义千问返回异常: {result}")
+
+        message = result["choices"][0]["message"]
+
+        if not message.get("tool_calls"):
+            return {"content": message.get("content", ""), "tool_calls_log": tool_calls_log}
+
+        messages.append(message)
+
+        for tc in message["tool_calls"]:
+            func_name = tc["function"]["name"]
+            func_args = json.loads(tc["function"]["arguments"])
+
+            if func_name == "search_resume":
+                result_text = tool_search_resume(func_args["keyword"], resume_text)
+            elif func_name == "evaluate_answer":
+                result_text = tool_evaluate_answer(func_args["answer"], func_args["criteria"])
+            elif func_name == "generate_report":
+                result_text = tool_generate_report(func_args["history_summary"])
+            else:
+                result_text = f"未知工具：{func_name}"
+
+            tool_calls_log.append({"tool": func_name, "args": func_args, "result": result_text[:200]})
+            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_text})
+
+    return {"content": messages[-1].get("content", "（工具调用超限）"), "tool_calls_log": tool_calls_log}
+
+
 app = FastAPI()
 
 # 允许前端跨域调用
@@ -492,8 +678,6 @@ async def interview_chat(req: InterviewChatRequest):
         prompt = f"""你是面试官。候选人刚回答了你的问题，请根据他的回答**追问**。
 
 【岗位 JD】{jd_text[:500]}
-【候选人简历】
-{resume_text[:1200]}
 
 【面试历史（最近几轮）】
 {format_history(history[-6:])}
@@ -501,17 +685,26 @@ async def interview_chat(req: InterviewChatRequest):
 【候选人本轮回答】
 {req.answer}
 
+【工作流程——必须遵守】
+1. 分析候选人回答中提到的项目、技术、经历
+2. 调用 search_resume 工具搜索简历中的对应细节
+3. 基于搜索结果 + 候选人回答，生成有针对性的追问
+4. 如果回答很完整且无需简历细节，可直接推进下一题
+
 【追问要求】
-1. 如果回答里有技术漏洞、含糊、没展开的细节 → 追着这个点问，问细节
-2. 如果回答很完整 → 推进到下一个相关问题（基于简历/JD）
-3. 问题要具体、有追问感，体现你真的听了他刚才说的话
-4. 只输出追问内容，不超过 80 字，不要寒暄"""
+- 问题要具体、有追问感，体现你真的听了他刚才说的话
+- 只输出追问内容，不超过 80 字，不要寒暄"""
 
     messages = [
-        {"role": "system", "content": "你是专业的技术面试官，追问犀利但友好。"},
+        {"role": "system", "content": "你是专业的技术面试官，追问犀利但友好。当候选人提到具体项目或技术时，先用 search_resume 工具查找简历中的相关细节，再基于细节追问。"},
         {"role": "user", "content": prompt},
     ]
-    ai_reply = await call_llm(messages)
+
+    # Agent 模式：带工具调用
+    result = await call_llm_with_tools(
+        messages, tools=AGENT_TOOLS, resume_text=resume_text
+    )
+    ai_reply = result["content"]
 
     save_message(req.session_id, "assistant", ai_reply)
 
@@ -526,14 +719,19 @@ async def interview_chat(req: InterviewChatRequest):
             "session_id": req.session_id,
             "ai": ai_reply,
             "report": report,
+            "tool_calls": result["tool_calls_log"],
         }
 
-    return {"session_id": req.session_id, "ai": ai_reply}
+    return {
+        "session_id": req.session_id,
+        "ai": ai_reply,
+        "tool_calls": result["tool_calls_log"],
+    }
 
 
 @app.post("/interview/chat-stream")
 async def interview_chat_stream(req: InterviewChatRequest):
-    """SSE 流式版本的面试追问"""
+    """SSE 流式版本的面试追问（Agent 模式：先执行工具，再流式输出）"""
     history = load_history(req.session_id)
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
@@ -565,56 +763,40 @@ async def interview_chat_stream(req: InterviewChatRequest):
         prompt = f"""你是面试官。候选人刚回答了你的问题，请根据他的回答追问。
 
 【岗位 JD】{jd_text[:500]}
-【候选人简历】
-{resume_text[:1200]}
+
 【面试历史（最近几轮）】
 {format_history(history[-6:])}
 【候选人本轮回答】
 {req.answer}
+
+【工作流程——必须遵守】
+1. 分析候选人回答中提到的项目、技术、经历
+2. 调用 search_resume 工具搜索简历中的对应细节
+3. 基于搜索结果 + 候选人回答，生成有针对性的追问
+4. 如果回答很完整且无需简历细节，可直接推进下一题
+
 【追问要求】
-1. 如果回答里有技术漏洞、含糊、没展开的细节 → 追着这个点问，问细节
-2. 如果回答很完整 → 推进到下一个相关问题（基于简历/JD）
-3. 问题要具体、有追问感，体现你真的听了他刚才说的话
-4. 只输出追问内容，不超过 80 字，不要寒暄"""
+- 问题要具体、有追问感，体现你真的听了他刚才说的话
+- 只输出追问内容，不超过 80 字，不要寒暄"""
 
+    # 先用 Agent 处理工具调用（search_resume 等）
+    agent_messages = [
+        {"role": "system", "content": "你是专业的技术面试官，追问犀利但友好。当候选人提到具体项目或技术时，先用 search_resume 工具查找简历中的相关细节，再基于细节追问。"},
+        {"role": "user", "content": prompt},
+    ]
+    agent_result = await call_llm_with_tools(
+        agent_messages, tools=AGENT_TOOLS, resume_text=resume_text
+    )
+    final_reply = agent_result["content"]
+
+    # 把 Agent 的最终回复存进数据库
+    save_message(req.session_id, "assistant", final_reply)
+
+    # 流式推送给前端（逐字效果）
     async def generate():
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
-                "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {QWEN_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "qwen-max",
-                    "messages": [
-                        {"role": "system", "content": "你是专业的技术面试官，追问犀利但友好。"},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": True,
-                },
-                timeout=120,
-            ) as response:
-                full_reply = ""
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
-                        if data.strip() == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            delta = chunk["choices"][0]["delta"]
-                            if "content" in delta:
-                                text = delta["content"]
-                                full_reply += text
-                                yield f"data: {json.dumps({'text': text})}\n\n"
-                        except (json.JSONDecodeError, KeyError):
-                            continue
-
-                # 流结束后，存完整回复到数据库
-                save_message(req.session_id, "assistant", full_reply)
-                yield f"data: {json.dumps({'done': True, 'full_reply': full_reply})}\n\n"
+        for char in final_reply:
+            yield f"data: {json.dumps({'text': char})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'full_reply': final_reply, 'tool_calls': agent_result['tool_calls_log']})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
