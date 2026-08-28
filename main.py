@@ -484,6 +484,28 @@ def format_history(history: list) -> str:
     return "\n".join(lines)
 
 
+async def summarize_history(history: list) -> str:
+    """用 LLM 把早期对话压缩成摘要，控制 token 数量"""
+    if len(history) <= 6:
+        return ""
+    # 取前 N-3 轮压缩（保留最近 3 轮原文）
+    early = history[:-3]
+    prompt = f"""请将以下面试对话压缩成一段简洁的摘要（不超过 150 字），保留：
+- 候选人提到的关键技术、项目、回答要点
+- 面试官追问的核心问题
+- 候选人暴露的优点和不足
+
+对话内容：
+{format_history(early)}
+
+只输出摘要，不要其他文字。"""
+    try:
+        summary = await call_llm([{"role": "user", "content": prompt}], timeout=30)
+        return f"【早期对话摘要】{summary}"
+    except Exception:
+        return ""
+
+
 init_db()  # 服务启动时执行一次，建好表
 
 
@@ -675,12 +697,19 @@ async def interview_chat(req: InterviewChatRequest):
 }}
 评分都是 0-100 的整数。只输出 JSON，不要输出其他文字。"""
     else:
+        # 上下文管理：对话超过 6 轮时压缩早期历史
+        if len(history) > 6:
+            summary = await summarize_history(history)
+            history_text = summary + "\n" + format_history(history[-3:])
+        else:
+            history_text = format_history(history[-6:])
+
         prompt = f"""你是面试官。候选人刚回答了你的问题，请根据他的回答**追问**。
 
 【岗位 JD】{jd_text[:500]}
 
-【面试历史（最近几轮）】
-{format_history(history[-6:])}
+【面试历史】
+{history_text}
 
 【候选人本轮回答】
 {req.answer}
@@ -760,12 +789,19 @@ async def interview_chat_stream(req: InterviewChatRequest):
 {{"score": {{"technical": 0, "communication": 0, "logic": 0}}, "strengths": ["优点1","优点2","优点3"], "improvements": ["不足1","不足2"], "overall_comment": "综合评语（3句话）"}}
 评分都是 0-100 的整数。只输出 JSON，不要输出其他文字。"""
     else:
+        # 上下文管理：对话超过 6 轮时压缩早期历史
+        if len(history) > 6:
+            summary = await summarize_history(history)
+            history_text = summary + "\n" + format_history(history[-3:])
+        else:
+            history_text = format_history(history[-6:])
+
         prompt = f"""你是面试官。候选人刚回答了你的问题，请根据他的回答追问。
 
 【岗位 JD】{jd_text[:500]}
 
-【面试历史（最近几轮）】
-{format_history(history[-6:])}
+【面试历史】
+{history_text}
 【候选人本轮回答】
 {req.answer}
 
