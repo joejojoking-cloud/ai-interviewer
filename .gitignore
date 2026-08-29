@@ -7,3 +7,5 @@ __pycache__/
 *.db-shm
 *.db-wal
 test_files/
+.pytest_cache/
+eval/*.bak.*

@@ -18,10 +18,15 @@ load_dotenv()
 
 # 从环境变量读取 API Key
 LLM_API_KEY = os.getenv("LLM_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 # 检查 Key 是否存在
 if not LLM_API_KEY:
     raise ValueError("未找到 LLM_API_KEY，请检查 .env 文件")
+
+# 评分模型（双模型架构：追问用 MiMo，评分用 DeepSeek，v1 评估证明 qwen 系判分更准）
+SCORE_MODEL = os.getenv("SCORE_MODEL", "deepseek-v4-flash-vision-exp")
+SCORE_BASE_URL = os.getenv("SCORE_BASE_URL", "https://api.deepseek.com/v1/chat/completions")
 
 
 async def call_llm(messages: list, timeout: float = 120.0) -> str:
@@ -48,6 +53,35 @@ async def call_llm(messages: list, timeout: float = 120.0) -> str:
         result = response.json()
         if "choices" not in result:
             raise HTTPException(status_code=502, detail=f"LLM API 返回格式异常: {str(result)[:200]}")
+        return result["choices"][0]["message"]["content"]
+
+
+async def call_llm_score(messages: list, timeout: float = 120.0) -> str:
+    """调用评分模型（DeepSeek）。未配置 DeepSeek Key 时回退到 MiMo。"""
+    if not DEEPSEEK_API_KEY:
+        return await call_llm(messages, timeout)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            SCORE_BASE_URL,
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": SCORE_MODEL,
+                "messages": messages
+            },
+            timeout=timeout
+        )
+        if response.status_code == 401:
+            raise HTTPException(status_code=500, detail="评分模型 API Key 无效或已过期")
+        if response.status_code == 429:
+            raise HTTPException(status_code=503, detail="评分模型 API 限流，请稍后重试")
+        if response.status_code >= 500:
+            raise HTTPException(status_code=502, detail=f"评分模型 API 服务异常: {response.status_code}")
+        result = response.json()
+        if "choices" not in result:
+            raise HTTPException(status_code=502, detail=f"评分模型 API 返回格式异常: {str(result)[:200]}")
         return result["choices"][0]["message"]["content"]
 
 
@@ -92,6 +126,27 @@ AGENT_TOOLS = [
                     }
                 },
                 "required": ["answer", "criteria"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_interview_plan",
+            "description": "获取面试的阶段计划。当某个话题回答已充分、需要推进到下一个话题，或刚开始面试不知道问什么时调用，返回当前阶段建议和下一阶段方向。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "current_topic": {
+                        "type": "string",
+                        "description": "当前正在问的话题（如：秒杀系统、Redis 原理、自我介绍）"
+                    },
+                    "covered_topics": {
+                        "type": "string",
+                        "description": "已经覆盖的话题，用分号分隔；不知道就传空字符串"
+                    }
+                },
+                "required": ["current_topic", "covered_topics"]
             }
         }
     },
@@ -184,6 +239,55 @@ def tool_generate_report(history_summary: str) -> str:
     )
 
 
+# 面试阶段蓝图：规划工具输出下一步该问什么
+INTERVIEW_BLUEPRINT = [
+    {"phase": "项目深挖", "focus": "验证简历真实性：项目背景、技术选型权衡、量化成果、踩坑复盘"},
+    {"phase": "技术深度", "focus": "核心技术栈原理：底层实现、复杂度分析、性能优化"},
+    {"phase": "场景/设计题", "focus": "开放性问题：系统设计、故障排查、边界情况处理"},
+    {"phase": "软素质", "focus": "团队协作、压力场景、主动性、学习能力"},
+    {"phase": "反问环节", "focus": "给候选人提问机会，考察关注点"},
+]
+
+
+def tool_get_interview_plan(current_topic: str, covered_topics: str = "") -> str:
+    """根据当前话题和已覆盖话题，返回面试阶段计划和下一步方向"""
+    current_topic = (current_topic or "").strip()
+    covered = covered_topics or ""
+
+    def match_phase(topic: str) -> str:
+        """粗分类：按关键词判断话题属于哪个阶段"""
+        if any(k in topic for k in ["项目", "简历", "实习", "架构", "系统"]):
+            return "项目深挖"
+        if any(k in topic for k in ["原理", "底层", "算法", "优化", "并发", "实现", "数据库", "缓存"]):
+            return "技术深度"
+        if any(k in topic for k in ["设计", "场景", "故障", "排查", "模拟", "麻烦"]):
+            return "场景/设计题"
+        if any(k in topic for k in ["团队", "沟通", "协作", "冲突", "成长", "学习", "离职"]):
+            return "软素质"
+        if any(k in topic for k in ["有什么要问", "反问", "提问"]):
+            return "反问环节"
+        return "技术深度"
+
+    current_phase = match_phase(current_topic)
+
+    # 根据粗分类列举已完成阶段，输出当前阶段建议 + 下一阶段
+    phases = [p["phase"] for p in INTERVIEW_BLUEPRINT]
+    current_idx = phases.index(current_phase) if current_phase in phases else 0
+    next_phase = phases[current_idx + 1] if current_idx + 1 < len(phases) else "面试收尾"
+
+    remaining = [p for p in INTERVIEW_BLUEPRINT if p["phase"] not in current_phase and p["phase"] != "反问环节"]
+    result = {
+        "current_phase": current_phase,
+        "focus": next((p["focus"] for p in INTERVIEW_BLUEPRINT if p["phase"] == current_phase), ""),
+        "advice": f"当前话题「{current_topic}」围绕「{current_phase}」阶段展开；如该话题已问透，建议推进到「{next_phase}」阶段。",
+        "covered_topics": covered,
+        "next_phase": next_phase,
+        "next_direction": next((p["focus"] for p in INTERVIEW_BLUEPRINT if p["phase"] == next_phase), "综合评估并安排反问"),
+        "blueprint": remaining,
+    }
+    return json.dumps(result, ensure_ascii=False)
+
+
 async def call_llm_with_tools(messages: list, tools: list = None,
                                resume_text: str = "", timeout: float = 120.0) -> dict:
     """
@@ -238,6 +342,10 @@ async def call_llm_with_tools(messages: list, tools: list = None,
                 result_text = tool_search_resume(keyword, resume_text) if keyword else "关键词为空，无法搜索。"
             elif func_name == "evaluate_answer":
                 result_text = tool_evaluate_answer(func_args.get("answer", ""), func_args.get("criteria", ""))
+            elif func_name == "get_interview_plan":
+                result_text = tool_get_interview_plan(
+                    func_args.get("current_topic", ""), func_args.get("covered_topics", "")
+                )
             elif func_name == "generate_report":
                 result_text = tool_generate_report(func_args.get("history_summary", ""))
             else:
@@ -701,6 +809,14 @@ async def interview_chat(req: InterviewChatRequest):
 - 如果候选人全程没有展示任何技术能力或有效回答，相关维度应打低分，优点应如实反映实际情况（如"态度坦诚"），不能编造未展示的能力
 - 简历仅供参考，不代表面试中的真实表现
 
+【评分尺度（严格按此锚点打分，不要整体压分）】
+- 85-100：有原理、有具体数据、有踩坑复盘，追问时展开充分
+- 70-85：回答扎实，有技术原理或较深入的实践细节
+- 55-70：基本答对但深度一般，展开有限
+- 40-55：回答过于简单，只有结论没有过程
+- 20-40：含糊、答非所问或回避问题
+- 0-20：坦承不懂、几乎无有效内容
+
 【岗位 JD】{jd_text[:500]}
 【面试历史】
 {format_history(history)}
@@ -742,8 +858,12 @@ async def interview_chat(req: InterviewChatRequest):
 【决策树】
 A. 搜索命中简历细节 → 基于细节追问（问实现原理、踩过的坑、量化数据）
 B. 搜索未命中 → 基于候选人回答本身追问（问思路、权衡、替代方案）
-C. 候选人回答已经很充分（有原理+有数据+有反思）→ 推进到下一个话题
+C. 候选人回答已经很充分（有原理+有数据+有反思）→ 必须先调用 get_interview_plan 拿到下一阶段方向，再按 next_direction 出题（不得跳过工具直接问）
 D. 候选人明确表示不了解 → 不追问该点，换一个方向
+
+【工具纪律】
+- 每次回复前先检查是否需要调用工具；需要 get_interview_plan 时先调用再输出
+- 禁止在 C 分支跳过 get_interview_plan 直接编一个"新话题"
 
 【追问风格】
 - 引用候选人原话中的关键词，让他知道你在听
@@ -763,11 +883,17 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
         {"role": "user", "content": prompt},
     ]
 
-    # Agent 模式：带工具调用
-    result = await call_llm_with_tools(
-        messages, tools=AGENT_TOOLS, resume_text=resume_text
-    )
-    ai_reply = result["content"]
+    # 结束面试走评分模型：任务专用（评分无需工具，见 call_llm_score）
+    if req.is_finished:
+        ai_reply = await call_llm_score(messages)
+        tool_calls_log = []
+    else:
+        # Agent 模式：带工具调用
+        result = await call_llm_with_tools(
+            messages, tools=AGENT_TOOLS, resume_text=resume_text
+        )
+        ai_reply = result["content"]
+        tool_calls_log = result["tool_calls_log"]
 
     # LLM 成功后再存消息（避免 LLM 失败时留下孤儿数据）
     save_message(req.session_id, "user", req.answer)
@@ -784,13 +910,13 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
             "session_id": req.session_id,
             "ai": ai_reply,
             "report": report,
-            "tool_calls": result["tool_calls_log"],
+            "tool_calls": tool_calls_log,
         }
 
     return {
         "session_id": req.session_id,
         "ai": ai_reply,
-        "tool_calls": result["tool_calls_log"],
+        "tool_calls": tool_calls_log,
     }
 
 
@@ -814,6 +940,14 @@ async def interview_chat_stream(req: InterviewChatRequest):
 - 评分和优点必须严格基于候选人在面试对话中的实际表现，不能凭简历推测
 - 如果候选人全程没有展示任何技术能力或有效回答，相关维度应打低分，优点应如实反映实际情况（如"态度坦诚"），不能编造未展示的能力
 - 简历仅供参考，不代表面试中的真实表现
+
+【评分尺度（严格按此锚点打分，不要整体压分）】
+- 85-100：有原理、有具体数据、有踩坑复盘，追问时展开充分
+- 70-85：回答扎实，有技术原理或较深入的实践细节
+- 55-70：基本答对但深度一般，展开有限
+- 40-55：回答过于简单，只有结论没有过程
+- 20-40：含糊、答非所问或回避问题
+- 0-20：坦承不懂、几乎无有效内容
 
 【岗位 JD】{jd_text[:500]}
 【面试历史】
@@ -846,8 +980,12 @@ async def interview_chat_stream(req: InterviewChatRequest):
 【决策树】
 A. 搜索命中简历细节 → 基于细节追问（问实现原理、踩过的坑、量化数据）
 B. 搜索未命中 → 基于候选人回答本身追问（问思路、权衡、替代方案）
-C. 候选人回答已经很充分（有原理+有数据+有反思）→ 推进到下一个话题
+C. 候选人回答已经很充分（有原理+有数据+有反思）→ 必须先调用 get_interview_plan 拿到下一阶段方向，再按 next_direction 出题（不得跳过工具直接问）
 D. 候选人明确表示不了解 → 不追问该点，换一个方向
+
+【工具纪律】
+- 每次回复前先检查是否需要调用工具；需要 get_interview_plan 时先调用再输出
+- 禁止在 C 分支跳过 get_interview_plan 直接编一个"新话题"
 
 【追问风格】
 - 引用候选人原话中的关键词，让他知道你在听
@@ -858,19 +996,32 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
 - 直接输出追问内容，1-2 句话，不寒暄、不夸奖
 - 不要编造简历中不存在的项目或技术细节"""
 
-    # 先用 Agent 处理工具调用（search_resume 等）
-    agent_messages = [
-        {"role": "system", "content": (
-            "你是一位资深技术面试官。你的目标是通过追问判断候选人的真实技术水平。"
-            "风格：专业、直接、不刁难。不要说'很好的回答'之类的客套话。"
-            "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。"
-        )},
-        {"role": "user", "content": prompt},
-    ]
-    agent_result = await call_llm_with_tools(
-        agent_messages, tools=AGENT_TOOLS, resume_text=resume_text
-    )
-    final_reply = agent_result["content"]
+    # 结束面试走评分模型；否则 Agent 模式带工具调用
+    if req.is_finished:
+        agent_messages = [
+            {"role": "system", "content": (
+                "你是一位资深技术面试官。你的目标是通过追问判断候选人的真实技术水平。"
+                "风格：专业、直接、不刁难。不要说'很好的回答'之类的客套话。"
+                "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。"
+            )},
+            {"role": "user", "content": prompt},
+        ]
+        final_reply = await call_llm_score(agent_messages)
+        tool_calls_log = []
+    else:
+        agent_messages = [
+            {"role": "system", "content": (
+                "你是一位资深技术面试官。你的目标是通过追问判断候选人的真实技术水平。"
+                "风格：专业、直接、不刁难。不要说'很好的回答'之类的客套话。"
+                "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。"
+            )},
+            {"role": "user", "content": prompt},
+        ]
+        agent_result = await call_llm_with_tools(
+            agent_messages, tools=AGENT_TOOLS, resume_text=resume_text
+        )
+        final_reply = agent_result["content"]
+        tool_calls_log = agent_result["tool_calls_log"]
 
     # LLM 成功后再存消息
     save_message(req.session_id, "user", req.answer)
@@ -883,7 +1034,7 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
         for i in range(0, len(words), chunk_size):
             chunk = "".join(words[i:i + chunk_size])
             yield f"data: {json.dumps({'text': chunk})}\n\n"
-        yield f"data: {json.dumps({'done': True, 'full_reply': final_reply, 'tool_calls': agent_result['tool_calls_log']})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'full_reply': final_reply, 'tool_calls': tool_calls_log})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

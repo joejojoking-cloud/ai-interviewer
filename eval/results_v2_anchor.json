@@ -1,0 +1,690 @@
+[
+  {
+    "resume": "刘洋_算法工程师",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 10,
+      "communication": 15,
+      "logic": 10
+    },
+    "strengths": [
+      "提到了后端系统优化经验，包括性能压测、QPS提升、缓存穿透解决等",
+      "能够清晰地复述自己项目中的技术点"
+    ],
+    "improvements": [
+      "完全未理解面试官的问题，答非所问，未能展示与岗位要求相关的RAG、NLP技术能力",
+      "缺乏针对具体问题的深入分析和解释能力"
+    ],
+    "tool_calls": {
+      "search_resume": 7,
+      "evaluate_answer": 1,
+      "generate_report": 1
+    },
+    "session_id": "eval-刘洋_算法工程师-优秀"
+  },
+  {
+    "resume": "刘洋_算法工程师",
+    "strategy": "一般",
+    "scores": {
+      "technical": 8,
+      "communication": 15,
+      "logic": 10
+    },
+    "strengths": [
+      "没有编造技术细节或伪造数据",
+      "态度较为坦诚，主动提出结束面试而非胡乱作答"
+    ],
+    "improvements": [
+      "无法描述自己项目中的任何技术实现细节，包括简历声称的LoRA微调工作",
+      "面对追问直接选择回避，缺乏解决问题的意愿和沟通技巧"
+    ],
+    "tool_calls": {
+      "search_resume": 3,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-刘洋_算法工程师-一般"
+  },
+  {
+    "resume": "刘洋_算法工程师",
+    "strategy": "差",
+    "scores": {
+      "technical": 5,
+      "communication": 10,
+      "logic": 0
+    },
+    "strengths": [
+      "态度坦诚，未在无法回答的问题上纠缠"
+    ],
+    "improvements": [
+      "简历内容与面试表现严重不符",
+      "缺乏技术深度，无法解释任何项目细节"
+    ],
+    "tool_calls": {
+      "search_resume": 6,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-刘洋_算法工程师-差"
+  },
+  {
+    "resume": "吴娜_数据产品经理",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 25,
+      "communication": 20,
+      "logic": 20
+    },
+    "strengths": [
+      "面对质疑时选择终止而非继续编造，保持了一定的坦诚",
+      "回答中包含具体数据（QPS、内存占用等），至少展示了基本的数据意识"
+    ],
+    "improvements": [
+      "全程答非所问，未回答面试官关于'产品经理如何将算法转化为产品功能'的核心问题",
+      "所描述的技术内容与简历记载明显矛盾，疑似背诵模板答案",
+      "面对追问时选择逃避而非澄清或反思，缺乏问题解决意识"
+    ],
+    "tool_calls": {
+      "search_resume": 2,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-吴娜_数据产品经理-优秀"
+  },
+  {
+    "resume": "吴娜_数据产品经理",
+    "strategy": "一般",
+    "scores": {
+      "technical": 30,
+      "communication": 30,
+      "logic": 30
+    },
+    "strengths": [
+      "态度坦诚，没有强行编造细节",
+      "面试全程表现稳定，无明显紧张或语无伦次"
+    ],
+    "improvements": [
+      "回答过于笼统，缺乏具体技术细节和项目职责描述",
+      "回避技术深入讨论，未能有效展示与岗位相关的能力"
+    ],
+    "tool_calls": {
+      "search_resume": 5,
+      "evaluate_answer": 1,
+      "generate_report": 0
+    },
+    "session_id": "eval-吴娜_数据产品经理-一般"
+  },
+  {
+    "resume": "吴娜_数据产品经理",
+    "strategy": "差",
+    "scores": {
+      "technical": 0,
+      "communication": 20,
+      "logic": 0
+    },
+    "strengths": [
+      "态度坦诚，直接承认不了解项目细节"
+    ],
+    "improvements": [
+      "技术能力未得到任何展示",
+      "沟通表达极为简短，未提供有效信息",
+      "简历描述与实际掌握程度存在明显差距"
+    ],
+    "tool_calls": {
+      "search_resume": 8,
+      "evaluate_answer": 1,
+      "generate_report": 1
+    },
+    "session_id": "eval-吴娜_数据产品经理-差"
+  },
+  {
+    "resume": "周杰_运维工程师",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 15,
+      "communication": 20,
+      "logic": 25
+    },
+    "strengths": [
+      "回答中展示了对系统架构的一定了解，提到了分层架构、Redis缓存、分库分表、布隆过滤器等技术概念",
+      "态度配合，愿意参与面试流程"
+    ],
+    "improvements": [
+      "严重答非所问：面试官三次追问CI/CD流水线优化细节，候选人三次均给出完全相同且与问题无关的回答（系统架构优化），未能识别和回应问题的核心",
+      "缺乏有效倾听与应变能力：在被明确纠正后仍未调整回答方向，最终以'我答完了，可以结束了'草草收场，回避了核心问题"
+    ],
+    "tool_calls": {
+      "search_resume": 6,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-周杰_运维工程师-优秀"
+  },
+  {
+    "resume": "周杰_运维工程师",
+    "strategy": "一般",
+    "scores": {
+      "technical": 25,
+      "communication": 20,
+      "logic": 20
+    },
+    "strengths": [
+      "态度坦诚，承认具体数据记不清楚",
+      "知晓微服务、前后端分离等技术概念"
+    ],
+    "improvements": [
+      "全程未提供任何实质性技术回答，仅重复简历概述",
+      "面对追问选择回避并主动终止面试，未能展示解决问题的能力",
+      "缺乏对项目细节的掌握，无法回答服务拆分的核心问题"
+    ],
+    "tool_calls": {
+      "search_resume": 2,
+      "evaluate_answer": 3,
+      "generate_report": 1
+    },
+    "session_id": "eval-周杰_运维工程师-一般"
+  },
+  {
+    "resume": "周杰_运维工程师",
+    "strategy": "差",
+    "scores": {
+      "technical": 0,
+      "communication": 5,
+      "logic": 0
+    },
+    "strengths": [
+      "态度坦诚，直接承认对简历项目不了解，没有编造答案"
+    ],
+    "improvements": [
+      "对简历中明确列出的项目完全无法展开，面试前未梳理项目细节",
+      "面对问题过于被动，缺乏尝试回答或澄清问题的主动性"
+    ],
+    "tool_calls": {
+      "search_resume": 10,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-周杰_运维工程师-差"
+  },
+  {
+    "resume": "孙婷_测试工程师",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 10,
+      "communication": 15,
+      "logic": 10
+    },
+    "strengths": [
+      "回答简洁直接"
+    ],
+    "improvements": [
+      "回答与问题不相关，缺乏针对性",
+      "技术深度不足，未展示测试用例设计或自动化框架知识"
+    ],
+    "tool_calls": {
+      "search_resume": 3,
+      "evaluate_answer": 1,
+      "generate_report": 1
+    },
+    "session_id": "eval-孙婷_测试工程师-优秀"
+  },
+  {
+    "resume": "孙婷_测试工程师",
+    "strategy": "一般",
+    "scores": {
+      "technical": 10,
+      "communication": 25,
+      "logic": 15
+    },
+    "strengths": [
+      "态度直接，未过度包装或编造技术细节"
+    ],
+    "improvements": [
+      "对简历中明确记录的项目经验无法给出任何实质性说明",
+      "面对追问时回避问题而非坦诚沟通，沟通意愿和能力不足",
+      "主动终止面试，未展示解决问题的意愿"
+    ],
+    "tool_calls": {
+      "search_resume": 4,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-孙婷_测试工程师-一般"
+  },
+  {
+    "resume": "孙婷_测试工程师",
+    "strategy": "差",
+    "scores": {
+      "technical": 10,
+      "communication": 25,
+      "logic": 15
+    },
+    "strengths": [
+      "态度坦诚，没有虚构技术细节",
+      "主动结束面试，不拖延时间"
+    ],
+    "improvements": [
+      "简历中描述的项目经历无法在面试中展开，疑似简历与实际能力不符",
+      "面对技术问题直接回避，没有尝试从已知部分切入回答"
+    ],
+    "tool_calls": {
+      "search_resume": 2,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-孙婷_测试工程师-差"
+  },
+  {
+    "resume": "张伟_后端开发",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 25,
+      "communication": 30,
+      "logic": 25
+    },
+    "strengths": [
+      "态度坦诚直接"
+    ],
+    "improvements": [
+      "回答回避核心技术问题，答非所问",
+      "未能提供任何具体的技术实现细节"
+    ],
+    "tool_calls": {
+      "search_resume": 8,
+      "evaluate_answer": 1,
+      "generate_report": 0
+    },
+    "session_id": "eval-张伟_后端开发-优秀"
+  },
+  {
+    "resume": "张伟_后端开发",
+    "strategy": "一般",
+    "scores": {
+      "technical": 10,
+      "communication": 25,
+      "logic": 10
+    },
+    "strengths": [
+      "态度坦诚，没有编造自己不具备的知识",
+      "知道自己的不足后选择结束而非强行编造，有一定的自我认知"
+    ],
+    "improvements": [
+      "简历中明确提到的技术细节（Redis预减库存、异步下单、FastAPI）在面试中完全无法展开，简历与实际能力严重不符",
+      "面对追问时用完全相同的套话回避问题，未能展示任何技术思考过程或尝试解答的意愿"
+    ],
+    "tool_calls": {
+      "search_resume": 4,
+      "evaluate_answer": 1,
+      "generate_report": 1
+    },
+    "session_id": "eval-张伟_后端开发-一般"
+  },
+  {
+    "resume": "张伟_后端开发",
+    "strategy": "差",
+    "scores": {
+      "technical": 0,
+      "communication": 0,
+      "logic": 0
+    },
+    "strengths": [
+      "态度坦诚，承认自己不了解技术细节"
+    ],
+    "improvements": [
+      "未能回答任何技术问题",
+      "缺乏技术深度和有效内容",
+      "回避问题并直接结束面试"
+    ],
+    "tool_calls": {
+      "search_resume": 1,
+      "evaluate_answer": 0,
+      "generate_report": 0
+    },
+    "session_id": "eval-张伟_后端开发-差"
+  },
+  {
+    "resume": "李雪_前端开发",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 5,
+      "communication": 20,
+      "logic": 10
+    },
+    "strengths": [
+      "态度坦诚，主动结束面试",
+      "简历中提及后端架构知识（但面试中未有效展示）"
+    ],
+    "improvements": [
+      "答非所问，完全未回答前端SSE相关技术问题",
+      "面对引导仍重复相同内容，缺乏自省与调整能力"
+    ],
+    "tool_calls": {
+      "search_resume": 6,
+      "evaluate_answer": 2,
+      "generate_report": 1
+    },
+    "session_id": "eval-李雪_前端开发-优秀"
+  },
+  {
+    "resume": "李雪_前端开发",
+    "strategy": "一般",
+    "scores": {
+      "technical": 25,
+      "communication": 20,
+      "logic": 15
+    },
+    "strengths": [],
+    "improvements": [
+      "回避技术问题，无法提供具体细节",
+      "缺乏技术深度，无法展开讨论",
+      "沟通意愿低，提前结束面试"
+    ],
+    "tool_calls": {
+      "search_resume": 4,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-李雪_前端开发-一般"
+  },
+  {
+    "resume": "李雪_前端开发",
+    "strategy": "差",
+    "scores": {
+      "technical": 5,
+      "communication": 25,
+      "logic": 10
+    },
+    "strengths": [
+      "态度坦诚，不夸大自己的能力",
+      "能够识别自己知识的边界"
+    ],
+    "improvements": [
+      "对简历上列出的项目缺乏基本了解，无法回答任何技术细节",
+      "面试态度消极，主动要求结束而未尝试补充其他信息"
+    ],
+    "tool_calls": {
+      "search_resume": 7,
+      "evaluate_answer": 2,
+      "generate_report": 0
+    },
+    "session_id": "eval-李雪_前端开发-差"
+  },
+  {
+    "resume": "王芳_产品经理",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 45,
+      "communication": 25,
+      "logic": 30
+    },
+    "strengths": [
+      "能复述出分层架构、Redis缓存、布隆过滤器等技术概念",
+      "面对无法回答的问题时主动选择结束而非继续编造"
+    ],
+    "improvements": [
+      "全程答非所问，两次回答内容完全相同，均与面试官问的产品需求分析问题无关",
+      "无法理解问题意图，面试官两次引导后仍未能调整回答方向",
+      "缺乏产品思维和需求分析能力的展示",
+      "沟通意愿薄弱，遇到困难直接终止对话"
+    ],
+    "tool_calls": {
+      "search_resume": 3,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-王芳_产品经理-优秀"
+  },
+  {
+    "resume": "王芳_产品经理",
+    "strategy": "一般",
+    "scores": {
+      "technical": 15,
+      "communication": 20,
+      "logic": 15
+    },
+    "strengths": [
+      "回答较为坦诚，没有编造不存在的技术细节"
+    ],
+    "improvements": [
+      "无法阐述任何项目技术细节和方法论",
+      "面对追问时选择回避而非尝试回答",
+      "主动终止面试，缺乏深入沟通意愿"
+    ],
+    "tool_calls": {
+      "search_resume": 4,
+      "evaluate_answer": 2,
+      "generate_report": 1
+    },
+    "session_id": "eval-王芳_产品经理-一般"
+  },
+  {
+    "resume": "王芳_产品经理",
+    "strategy": "差",
+    "scores": {
+      "technical": 15,
+      "communication": 30,
+      "logic": 25
+    },
+    "strengths": [
+      "态度坦诚，直接承认对技术细节不了解，未编造能力",
+      "没有强行回答不熟悉的内容，避免了进一步暴露短板"
+    ],
+    "improvements": [
+      "对简历中明确提到的项目缺乏基本理解和阐述能力",
+      "面对追问时未能进行任何有效沟通或尝试解释",
+      "无法展示从需求到技术方案的转化能力"
+    ],
+    "tool_calls": {
+      "search_resume": 5,
+      "evaluate_answer": 2,
+      "generate_report": 0
+    },
+    "session_id": "eval-王芳_产品经理-差"
+  },
+  {
+    "resume": "赵磊_全栈开发",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 45,
+      "communication": 30,
+      "logic": 50
+    },
+    "strengths": [
+      "提到多种技术点如分层架构、网关限流、缓存等，展示一定技术广度",
+      "给出具体性能优化数据（QPS提升、内存降低）",
+      "提及缓存穿透等踩坑经历及布隆过滤器解决方案"
+    ],
+    "improvements": [
+      "技术回答缺乏具体实现细节，如分库分表、布隆过滤器的落地过程未展开",
+      "面试态度消极，面对追问重复回答并提前结束面试"
+    ],
+    "tool_calls": {
+      "search_resume": 12,
+      "evaluate_answer": 0,
+      "generate_report": 1
+    },
+    "session_id": "eval-赵磊_全栈开发-优秀"
+  },
+  {
+    "resume": "赵磊_全栈开发",
+    "strategy": "一般",
+    "scores": {
+      "technical": 20,
+      "communication": 40,
+      "logic": 30
+    },
+    "strengths": [
+      "态度坦诚，承认具体数据记不清楚"
+    ],
+    "improvements": [
+      "回答过于笼统，未提供任何技术原理或实践细节",
+      "回避对项目具体设计与优化方法的深入讨论"
+    ],
+    "tool_calls": {
+      "search_resume": 3,
+      "evaluate_answer": 1,
+      "generate_report": 1
+    },
+    "session_id": "eval-赵磊_全栈开发-一般"
+  },
+  {
+    "resume": "赵磊_全栈开发",
+    "strategy": "差",
+    "scores": {
+      "technical": 10,
+      "communication": 15,
+      "logic": 10
+    },
+    "strengths": [
+      "未编造虚假技术细节，表现相对诚实",
+      "回答简洁，未浪费面试时间"
+    ],
+    "improvements": [
+      "对简历中标注的技术栈和项目均无法展开说明，存在简历与实际能力不符的嫌疑",
+      "未尝试回答问题，直接放弃，缺乏基本的问题应对能力和学习意愿",
+      "未展示任何技术深度或实战经验"
+    ],
+    "tool_calls": {
+      "search_resume": 8,
+      "evaluate_answer": 0,
+      "generate_report": 0
+    },
+    "session_id": "eval-赵磊_全栈开发-差"
+  },
+  {
+    "resume": "郑浩_安全工程师",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 10,
+      "communication": 25,
+      "logic": 15
+    },
+    "strengths": [
+      "回答有一定的结构化表达",
+      "最终选择结束面试而非继续编造相关内容，保持了一定的坦诚"
+    ],
+    "improvements": [
+      "围绕简历项目提问时答非所问，未能展示对漏洞扫描器核心检测逻辑的任何理解",
+      "陈述了简历中不存在的技术细节（Redis缓存、分库分表、布隆过滤器等），存在内容真实性存疑的风险",
+      "面对明确的追问选择回避而非尝试回答，缺乏解决问题的主动性"
+    ],
+    "tool_calls": {
+      "search_resume": 8,
+      "evaluate_answer": 2,
+      "generate_report": 1
+    },
+    "session_id": "eval-郑浩_安全工程师-优秀"
+  },
+  {
+    "resume": "郑浩_安全工程师",
+    "strategy": "一般",
+    "scores": {
+      "technical": 20,
+      "communication": 20,
+      "logic": 10
+    },
+    "strengths": [
+      "有项目开发经验提及",
+      "态度配合参与面试"
+    ],
+    "improvements": [
+      "回答含糊缺乏技术细节",
+      "沟通重复回避核心问题"
+    ],
+    "tool_calls": {
+      "search_resume": 4,
+      "evaluate_answer": 0,
+      "generate_report": 0
+    },
+    "session_id": "eval-郑浩_安全工程师-一般"
+  },
+  {
+    "resume": "郑浩_安全工程师",
+    "strategy": "差",
+    "scores": {
+      "technical": 0,
+      "communication": 0,
+      "logic": 0
+    },
+    "strengths": [
+      "态度坦诚，能直接承认对项目技术细节不了解"
+    ],
+    "improvements": [
+      "对项目技术实现缺乏基本理解",
+      "面试中无法展示任何技术深度或实践经验"
+    ],
+    "tool_calls": {
+      "search_resume": 6,
+      "evaluate_answer": 1,
+      "generate_report": 0
+    },
+    "session_id": "eval-郑浩_安全工程师-差"
+  },
+  {
+    "resume": "陈明_数据分析师",
+    "strategy": "优秀",
+    "scores": {
+      "technical": 20,
+      "communication": 20,
+      "logic": 20
+    },
+    "strengths": [
+      "面试态度直接"
+    ],
+    "improvements": [
+      "回答完全偏离问题，未能针对特征工程给出任何实质内容",
+      "遇到追问直接放弃，缺乏技术探讨的意愿"
+    ],
+    "tool_calls": {
+      "search_resume": 7,
+      "evaluate_answer": 1,
+      "generate_report": 0
+    },
+    "session_id": "eval-陈明_数据分析师-优秀"
+  },
+  {
+    "resume": "陈明_数据分析师",
+    "strategy": "一般",
+    "scores": {
+      "technical": 10,
+      "communication": 20,
+      "logic": 15
+    },
+    "strengths": [
+      "态度坦诚，直接表达结束意愿"
+    ],
+    "improvements": [
+      "回避技术细节，缺乏深度",
+      "回答笼统，无法评估实际能力"
+    ],
+    "tool_calls": {
+      "search_resume": 5,
+      "evaluate_answer": 1,
+      "generate_report": 1
+    },
+    "session_id": "eval-陈明_数据分析师-一般"
+  },
+  {
+    "resume": "陈明_数据分析师",
+    "strategy": "差",
+    "scores": {
+      "technical": 5,
+      "communication": 10,
+      "logic": 5
+    },
+    "strengths": [
+      "态度坦诚，直接承认对项目细节不了解",
+      "没有编造虚假信息试图糊弄"
+    ],
+    "improvements": [
+      "简历项目无法回答任何实质性问题，存在包装嫌疑",
+      "面对追问时选择完全回避而非尝试思考，缺乏基本的问题应对能力"
+    ],
+    "tool_calls": {
+      "search_resume": 1,
+      "evaluate_answer": 1,
+      "generate_report": 0
+    },
+    "session_id": "eval-陈明_数据分析师-差"
+  }
+]

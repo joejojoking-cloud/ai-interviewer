@@ -1,0 +1,29 @@
+# 面试记录
+# 简历：周杰_运维工程师    策略：优秀
+# 会话：eval-周杰_运维工程师-优秀
+#
+# 说明：面试官为 AI，候选人为 LLM 扮演的应聘者
+#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=#=
+
+[面试官]
+开场白：你好，周杰，我是今天的面试官。很高兴看到你有扎实的 DevOps 实践经验。接下来，我们会先聊聊你简历中的项目，然后可能会进行一些技术场景的讨论，请放轻松。
+
+第一个问题：在你的第一个项目“微服务容器化迁移”中，你提到搭建了 CI/CD 流水线，将部署时间大幅缩短。能否请你详细介绍一下这条流水线的设计，以及你是如何选择和集成相关工具（例如，源码管理、构建、测试、镜像仓库和部署到 K8s 等环节）来确保其稳定高效的？
+
+[候选人]
+（面试开始，候选人准备回答）
+
+[候选人]
+这个流水线我选了 GitLab 做源码管理和 MR 触发，Jenkins 做构建，Harbor 做镜像仓库，最后用 ArgoCD 做 K8s 持续部署。关键设计是：Jenkins 只负责 build/test/push，不碰集群；ArgoCD 监听镜像 tag 变化自动 sync，避免 Jenkins 的 RBAC 权限过大。构建阶段用 Docker-in-Docker，但遇到 daemon 重启丢缓存的问题，后来改成 Kaniko，镜像构建从 10 分钟压到 3 分钟。测试分两层：单元测试在 pipeline 里跑，集成测试用 pytest 在 staging 集群起临时 namespace，跑完即删。HPA 依赖 metrics-server，这里踩过坑：pod 刚启动时 CPU 数据为空导致扩缩容抖动，加了 stabilizationWindowSeconds 和 minReplicas 2 才稳定。部署时间从 30 分钟降到 3 分钟，主要是并行化：8 个服务拆成 4 条 pipeline 跑，加缓存镜像层，同时通过 K8s rolling update maxSurge=1 maxUnavailable=0 保证零停机。
+
+[面试官]
+简历中未找到与「Kaniko」相关的内容。
+
+[候选人]
+坦白讲，简历里确实没写 Kaniko——不是不了解，而是当时在微服务容器化迁移中，我们最终选了 BuildKit + 缓存层，没用 Kaniko。理由很直接：Kaniko 的优势是不依赖 Docker daemon，适合 in-cluster 构建；但我们的 CI 流水线跑在自建 Runner 上，用 Docker 构建镜像配合 BuildKit 的 layer cache，效率比 Kaniko 的 snapshot 差分高。当时实测，Java 服务镜像构建从 12 分钟压到 4 分钟。如果是 Kubernetes in-cluster 构建，Kaniko 确实更轻，也不用担心 Docker daemon 挂掉导致构建失败——这点踩过坑，Runner 主机的 daemon 曾被并发的 10 个 job 压崩。现在补认证后复盘，如果用 Kaniko 放在 K8s 的 Job 里做镜像构建，隔离性和并发性会更好，但需要仔细处理 base image 的 registry 认证和缓存持久化。您这么问，是看重 Kaniko 在无特权环境下的安全性，还是想考察我们对构建链路的选型权衡？
+
+[面试官]
+你提到"Runner主机的daemon曾被并发的10个job压崩"，当时这个故障的直接现象是什么？你是如何快速定位到是并发job导致的？
+
+[候选人]
+我答完了，可以结束了。
