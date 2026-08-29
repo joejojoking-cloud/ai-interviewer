@@ -1,6 +1,53 @@
 const BASE = "/api";
 const BACKEND = "http://127.0.0.1:8000"; // 流式请求直连后端，绕过 Next.js 代理缓冲
 
+// 类型定义
+interface ResumeAnalysis {
+  basic: {
+    name: string;
+    school: string;
+    major: string;
+    degree: string;
+  };
+  skills: string[];
+  projects: Array<{
+    name: string;
+    tech: string;
+    achievement: string;
+  }>;
+  highlights: string[];
+}
+
+interface InterviewReport {
+  score: {
+    technical: number;
+    communication: number;
+    logic: number;
+  };
+  strengths: string[];
+  improvements: string[];
+  overall_comment: string;
+}
+
+interface Session {
+  session_id: string;
+  name: string;
+  jd_text: string;
+  created_at: string;
+  msg_count: number;
+}
+
+export interface JdAnalysis {
+  position: string;
+  requirements: {
+    skills: string[];
+    experience: string;
+    education: string;
+  };
+  responsibilities: string[];
+  bonus: string[];
+}
+
 // 通用请求函数
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -24,15 +71,23 @@ export const api = {
 
   // 简历 AI 识别
   analyzeResume: (resume_text: string) =>
-    request<{ parsed: any }>("/analyze-resume", {
+    request<{ parsed: ResumeAnalysis }>("/analyze-resume", {
       method: "POST",
       body: JSON.stringify({ resume_text }),
+    }),
+
+  // JD AI 解析
+  analyzeJd: (jd_text: string) =>
+    request<{ parsed: JdAnalysis }>("/analyze-jd", {
+      method: "POST",
+      body: JSON.stringify({ jd_text }),
     }),
 
   // 开始面试
   startInterview: (data: {
     resume_text: string;
     jd_text?: string;
+    jd_parsed?: JdAnalysis | null;
     candidate_name?: string;
   }) =>
     request<{ session_id: string; ai_reply: string }>("/interview/start", {
@@ -46,7 +101,7 @@ export const api = {
     answer: string;
     is_finished?: boolean;
   }) =>
-    request<{ session_id: string; ai: string; report?: any }>(
+    request<{ session_id: string; ai: string; report?: InterviewReport }>(
       "/interview/chat",
       {
         method: "POST",
@@ -55,7 +110,7 @@ export const api = {
     ),
 
   // 会话列表
-  getSessions: () => request<{ sessions: any[] }>("/sessions"),
+  getSessions: () => request<{ sessions: Session[] }>("/sessions"),
 
   // 会话消息
   getSessionMessages: (session_id: string) =>

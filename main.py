@@ -249,7 +249,8 @@ INTERVIEW_BLUEPRINT = [
 ]
 
 
-def tool_get_interview_plan(current_topic: str, covered_topics: str = "") -> str:
+def tool_get_interview_plan(current_topic: str, covered_topics: str = "", 
+                            jd_skills: str = "") -> str:
     """根据当前话题和已覆盖话题，返回面试阶段计划和下一步方向"""
     current_topic = (current_topic or "").strip()
     covered = covered_topics or ""
@@ -285,11 +286,18 @@ def tool_get_interview_plan(current_topic: str, covered_topics: str = "") -> str
         "next_direction": next((p["focus"] for p in INTERVIEW_BLUEPRINT if p["phase"] == next_phase), "综合评估并安排反问"),
         "blueprint": remaining,
     }
+    
+    # 添加 JD 技能优先级
+    if jd_skills:
+        result["jd_skills_priority"] = jd_skills
+        result["advice"] += f"\n优先考察 JD 要求的技能：{jd_skills}"
+    
     return json.dumps(result, ensure_ascii=False)
 
 
 async def call_llm_with_tools(messages: list, tools: list = None,
-                               resume_text: str = "", timeout: float = 120.0) -> dict:
+                               resume_text: str = "", jd_skills: str = "",
+                               timeout: float = 120.0) -> dict:
     """
     支持 Function Calling 的 LLM 调用。
     自动处理工具调用循环：LLM 返回 tool_calls → 执行工具 → 结果喂回 → 直到生成最终回复。
@@ -344,7 +352,8 @@ async def call_llm_with_tools(messages: list, tools: list = None,
                 result_text = tool_evaluate_answer(func_args.get("answer", ""), func_args.get("criteria", ""))
             elif func_name == "get_interview_plan":
                 result_text = tool_get_interview_plan(
-                    func_args.get("current_topic", ""), func_args.get("covered_topics", "")
+                    func_args.get("current_topic", ""), func_args.get("covered_topics", ""),
+                    jd_skills=jd_skills
                 )
             elif func_name == "generate_report":
                 result_text = tool_generate_report(func_args.get("history_summary", ""))
@@ -456,9 +465,14 @@ def parse_docx(content: bytes) -> str:
     return text.strip()
 
 
+def parse_text(content: bytes) -> str:
+    """解析纯文本文件"""
+    return content.decode("utf-8", errors="ignore").strip()
+
+
 @app.post("/parse-resume")
 async def parse_resume(file: UploadFile = File(...)):
-    """上传简历（PDF 或 Word），返回纯文本"""
+    """上传简历/JD（PDF、Word、txt、md），返回纯文本"""
     # 读取文件内容
     content = await file.read()
 
@@ -467,8 +481,10 @@ async def parse_resume(file: UploadFile = File(...)):
         text = parse_pdf(content)
     elif file.filename.endswith(".docx"):
         text = parse_docx(content)
+    elif file.filename.endswith((".txt", ".md")):
+        text = parse_text(content)
     else:
-        return {"error": "只支持 PDF 和 Word 文件"}
+        return {"error": "只支持 PDF、Word、txt、md 文件"}
 
     return {
         "filename": file.filename,
@@ -507,6 +523,31 @@ async def start_interview(req: InterviewStartRequest):
     return {"first_question": first_question, "resume_parsed": True}
 
 
+def build_jd_directive(jd_parsed: dict | None, jd_text: str) -> str:
+    """根据解析后的 JD 生成确定性面试指令（无 LLM 调用）"""
+    if not jd_parsed:
+        return jd_text[:500] or "通用技术岗"
+    
+    position = jd_parsed.get("position", "通用技术岗")
+    requirements = jd_parsed.get("requirements", {})
+    skills = requirements.get("skills", [])[:6]  # 最多6个技能
+    experience = requirements.get("experience", "不限")
+    responsibilities = jd_parsed.get("responsibilities", [])[:4]  # 最多4条职责
+    bonus = jd_parsed.get("bonus", [])[:3]  # 最多3条加分项
+    
+    directive = f"【岗位】{position}\n"
+    if skills:
+        directive += f"【必考技能】{', '.join(skills)}\n"
+    if experience:
+        directive += f"【经验要求】{experience}\n"
+    if responsibilities:
+        directive += f"【职责场景】{'; '.join(responsibilities)}\n"
+    if bonus:
+        directive += f"【加分深挖】{'; '.join(bonus)}"
+    
+    return directive[:500]
+
+
 DB_PATH = "interviewer.db"
 
 # 模块级连接 + 线程锁，解决 SQLite 并发写入问题
@@ -516,7 +557,7 @@ _db_conn.execute("PRAGMA journal_mode=WAL")  # WAL 模式支持并发读写
 
 
 def init_db():
-    """启动时建表（如果不存在）"""
+    """启动时建表（如果不存在）+ 幂等迁移"""
     with _db_lock:
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
@@ -538,6 +579,13 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # 幂等迁移：检查并添加 jd_parsed 列
+        cursor = _db_conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'jd_parsed' not in columns:
+            _db_conn.execute("ALTER TABLE sessions ADD COLUMN jd_parsed TEXT")
+        
         _db_conn.commit()
 
 
@@ -562,12 +610,13 @@ def load_history(session_id: str, max_turns: int = 100) -> list:
 
 
 def create_session(session_id: str, name: str = "未命名面试",
-                   jd_text: str = "", resume_text: str = ""):
+                   jd_text: str = "", resume_text: str = "",
+                   jd_parsed: str | None = None):
     """创建一场面试会话"""
     with _db_lock:
         _db_conn.execute(
-            "INSERT OR IGNORE INTO sessions (session_id, name, jd_text, resume_text) VALUES (?, ?, ?, ?)",
-            (session_id, name, jd_text, resume_text),
+            "INSERT OR IGNORE INTO sessions (session_id, name, jd_text, resume_text, jd_parsed) VALUES (?, ?, ?, ?, ?)",
+            (session_id, name, jd_text, resume_text, jd_parsed),
         )
         _db_conn.commit()
 
@@ -599,12 +648,12 @@ def get_session_info(session_id: str) -> dict | None:
     """获取单个会话信息"""
     with _db_lock:
         row = _db_conn.execute(
-            "SELECT jd_text, resume_text FROM sessions WHERE session_id = ?",
+            "SELECT jd_text, resume_text, jd_parsed FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
     if not row:
         return None
-    return {"jd_text": row[0], "resume_text": row[1]}
+    return {"jd_text": row[0], "resume_text": row[1], "jd_parsed": row[2]}
 
 
 def format_history(history: list) -> str:
@@ -640,6 +689,25 @@ async def summarize_history(history: list) -> str:
 
 
 init_db()  # 服务启动时执行一次，建好表
+
+
+async def extract_structured_llm(prompt: str, system: str = "你是结构化解析专家，只输出 JSON 数据。", 
+                                  max_len: int = 3000) -> dict:
+    """调用 LLM 提取结构化 JSON，复用 JSON 清洗逻辑"""
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt[:max_len]},
+    ]
+    ai_reply = await call_llm(messages)
+    
+    # 清洗 ```json 标记
+    cleaned = ai_reply.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {"error": "AI 返回的不是合法 JSON", "raw": ai_reply}
+    
+    return {"parsed": data}
 
 
 class ChatSessionRequest(BaseModel):
@@ -705,22 +773,40 @@ async def analyze_resume(req: AnalyzeResumeRequest):
   "highlights": ["简历里最值得展开的3个亮点，每个一句话"]
 }}
 """
+    return await extract_structured_llm(prompt, "你是简历解析专家，只输出 JSON 数据。")
 
-    messages = [
-        {"role": "system", "content": "你是简历解析专家，只输出 JSON 数据。"},
-        {"role": "user", "content": prompt},
-    ]
-    ai_reply = await call_llm(messages)
 
-    # 防止 AI 输出 JSON 时带了多余的 ```json 标记
-    cleaned = ai_reply.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # 解析失败就原样返回文本，方便排查
-        return {"error": "AI 返回的不是合法 JSON", "raw": ai_reply}
+class AnalyzeJdRequest(BaseModel):
+    jd_text: str
 
-    return {"parsed": data}
+
+@app.post("/analyze-jd")
+async def analyze_jd(req: AnalyzeJdRequest):
+    """解析 JD，输出结构化 JSON"""
+    prompt = f"""请分析下面这份岗位描述（JD），提取关键信息，**只输出 JSON，不要输出任何其他文字**。
+
+【岗位描述】
+{req.jd_text[:2000]}
+
+【输出格式（严格按这个结构）】
+{{
+  "position": "岗位名称",
+  "requirements": {{
+    "skills": ["技能1", "技能2", "技能3"],
+    "experience": "经验要求（如：3年以上）",
+    "education": "学历要求（如：本科及以上）"
+  }},
+  "responsibilities": ["职责1", "职责2", "职责3"],
+  "bonus": ["加分项1", "加分项2"]
+}}
+
+【注意】
+- skills 数组最多 6 个核心技能
+- responsibilities 数组最多 5 条主要职责
+- bonus 数组最多 3 个加分项
+- 如果某项信息未提及，使用空数组 []
+"""
+    return await extract_structured_llm(prompt, "你是岗位分析专家，只输出 JSON 数据。")
 
 
 class StartInterviewRequest(BaseModel):
@@ -802,6 +888,7 @@ async def interview_chat(req: InterviewChatRequest):
         # 把用户回答加到 history 里，让 Prompt 里的历史是完整的
         history = history + [{"role": "user", "content": req.answer}]
         # 候选人想结束：输出结构化评分报告
+        jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
         prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
 
 【重要铁律】
@@ -817,7 +904,7 @@ async def interview_chat(req: InterviewChatRequest):
 - 20-40：含糊、答非所问或回避问题
 - 0-20：坦承不懂、几乎无有效内容
 
-【岗位 JD】{jd_text[:500]}
+【岗位面试指令】{jd_directive}
 【面试历史】
 {format_history(history)}
 
@@ -841,7 +928,8 @@ async def interview_chat(req: InterviewChatRequest):
         else:
             history_text = format_history(history[-6:])
 
-        prompt = f"""【岗位 JD】{jd_text[:500]}
+        jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
+        prompt = f"""【岗位面试指令】{jd_directive}
 
 【面试历史】
 {history_text}
@@ -889,8 +977,18 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
         tool_calls_log = []
     else:
         # Agent 模式：带工具调用
+        jd_parsed = session_info.get("jd_parsed")
+        jd_skills = ""
+        if jd_parsed:
+            try:
+                jd_data = json.loads(jd_parsed) if isinstance(jd_parsed, str) else jd_parsed
+                jd_skills = ", ".join(jd_data.get("requirements", {}).get("skills", [])[:6])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        
         result = await call_llm_with_tools(
-            messages, tools=AGENT_TOOLS, resume_text=resume_text
+            messages, tools=AGENT_TOOLS, resume_text=resume_text,
+            jd_skills=jd_skills
         )
         ai_reply = result["content"]
         tool_calls_log = result["tool_calls_log"]
@@ -934,6 +1032,7 @@ async def interview_chat_stream(req: InterviewChatRequest):
 
     if req.is_finished:
         history = history + [{"role": "user", "content": req.answer}]
+        jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
         prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
 
 【重要铁律】
@@ -949,7 +1048,7 @@ async def interview_chat_stream(req: InterviewChatRequest):
 - 20-40：含糊、答非所问或回避问题
 - 0-20：坦承不懂、几乎无有效内容
 
-【岗位 JD】{jd_text[:500]}
+【岗位面试指令】{jd_directive}
 【面试历史】
 {format_history(history)}
 
@@ -964,7 +1063,8 @@ async def interview_chat_stream(req: InterviewChatRequest):
         else:
             history_text = format_history(history[-6:])
 
-        prompt = f"""【岗位 JD】{jd_text[:500]}
+        jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
+        prompt = f"""【岗位面试指令】{jd_directive}
 
 【面试历史】
 {history_text}
@@ -1017,8 +1117,20 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
             )},
             {"role": "user", "content": prompt},
         ]
+        
+        # 提取 JD 技能列表
+        jd_parsed = session_info.get("jd_parsed")
+        jd_skills = ""
+        if jd_parsed:
+            try:
+                jd_data = json.loads(jd_parsed) if isinstance(jd_parsed, str) else jd_parsed
+                jd_skills = ", ".join(jd_data.get("requirements", {}).get("skills", [])[:6])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        
         agent_result = await call_llm_with_tools(
-            agent_messages, tools=AGENT_TOOLS, resume_text=resume_text
+            agent_messages, tools=AGENT_TOOLS, resume_text=resume_text,
+            jd_skills=jd_skills
         )
         final_reply = agent_result["content"]
         tool_calls_log = agent_result["tool_calls_log"]

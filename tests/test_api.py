@@ -16,7 +16,7 @@ def patch_llm(monkeypatch, reply=CHEER, tools_reply=None, score_reply=None):
     async def fake_call_llm(messages, timeout=120.0):
         return reply
 
-    async def fake_call_llm_with_tools(messages, tools=None, resume_text="", timeout=120.0):
+    async def fake_call_llm_with_tools(messages, tools=None, resume_text="", jd_skills="", timeout=120.0):
         return tools_reply or {
             "content": "追问内容",
             "tool_calls_log": [],
