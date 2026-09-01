@@ -646,8 +646,19 @@ export default function Home() {
       const filtered = data.messages.filter((m) => m.content !== "（面试开始，候选人准备回答）");
 
       // 优先用落库报告（权威来源，无需从消息里猜 JSON）
-      const saved = await api.getReport(sid);
-      if (saved.report && typeof saved.report === "object" && "score" in saved.report) {
+      // 降级策略：后端未部署报告接口/接口异常时，静默回退到"消息里解析 JSON"旧路径，
+      // 绝不让报告查询失败拖垮整个历史回看。
+      let saved: { report: InterviewReport | null } | null = null;
+      try {
+        saved = await api.getReport(sid);
+      } catch {
+        saved = null;
+      }
+      if (
+        saved?.report &&
+        typeof saved.report === "object" &&
+        "score" in saved.report
+      ) {
         setReport(saved.report);
         setStep("report");
         setMessages(filtered.slice(0, -1) as Message[]);
