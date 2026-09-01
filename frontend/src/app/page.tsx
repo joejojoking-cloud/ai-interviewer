@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import {
   Button,
   Input,
@@ -11,6 +12,8 @@ import {
   Popconfirm,
   Tooltip,
   Upload,
+  Modal,
+  Select,
 } from "antd";
 import {
   PlusOutlined,
@@ -21,12 +24,37 @@ import {
   RobotOutlined,
   SendOutlined,
   StopOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import { Radar } from "@ant-design/charts";
-import { api, JdAnalysis } from "./api";
+import { api, JdAnalysis, LlmSettingsResponse, LlmSlotUpdate, LlmSlotSettings } from "./api";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
+
+// 提供商预设：选择后自动填充地址和模型（与后端 LLM_PROVIDER_PRESETS 保持一致）
+const PROVIDER_PRESETS: Record<string, { base_url: string; model: string }> = {
+  MiMo: {
+    base_url: "https://api.xiaomimimo.com/v1/chat/completions",
+    model: "mimo-v2.5-pro",
+  },
+  DeepSeek: {
+    base_url: "https://api.deepseek.com/v1/chat/completions",
+    model: "deepseek-v4-flash-vision-exp",
+  },
+  OpenAI: {
+    base_url: "https://api.openai.com/v1/chat/completions",
+    model: "gpt-4o-mini",
+  },
+};
+
+// 设置弹窗里单个插槽的表单状态
+interface SlotForm {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+}
 
 /* ═══════════════════════════════════════════════════════════
    SVG 图标组件（Lucide / Iconoir 风格：1.5-2px stroke、圆角端点）
@@ -297,6 +325,13 @@ export default function Home() {
   const [isDragOver, setIsDragOver] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // ── LLM 插槽设置弹窗 ──
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [keysStatus, setKeysStatus] = useState<LlmSettingsResponse | null>(null);
+  const [mainForm, setMainForm] = useState<SlotForm>({ provider: "", base_url: "", model: "", api_key: "" });
+  const [scoreForm, setScoreForm] = useState<SlotForm>({ provider: "", base_url: "", model: "", api_key: "" });
+  const [keysSaving, setKeysSaving] = useState(false);
+
   // ── 自动滚动到底部 ──
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -329,6 +364,64 @@ export default function Home() {
     }
   }, [loadSessions]);
 
+  // ── LLM 插槽设置：读取当前状态并回填表单 ──
+  const loadKeyStatus = useCallback(async () => {
+    try {
+      const data = await api.getSettingsKeys();
+      setKeysStatus(data);
+      setMainForm({ provider: data.main.provider, base_url: data.main.base_url, model: data.main.model, api_key: "" });
+      setScoreForm({ provider: data.score.provider, base_url: data.score.base_url, model: data.score.model, api_key: "" });
+    } catch {
+      message.error("读取配置失败，请确认后端服务已启动");
+    }
+  }, []);
+
+  // 打开设置弹窗（拉取当前状态）
+  const openSettings = () => {
+    setSettingsOpen(true);
+    loadKeyStatus();
+  };
+
+  // 选择提供商预设：自动填充该提供商的地址和模型；「自定义」保留当前值
+  const applyPreset = (form: SlotForm, setForm: Dispatch<SetStateAction<SlotForm>>, provider: string) => {
+    const preset = PROVIDER_PRESETS[provider];
+    if (preset) {
+      setForm({ ...form, provider, base_url: preset.base_url, model: preset.model });
+    } else {
+      setForm({ ...form, provider });
+    }
+  };
+
+  // 保存插槽配置（留空字段表示不修改）
+  const handleSaveKeys = async () => {
+    const main: LlmSlotUpdate = {
+      api_key: mainForm.api_key.trim() || undefined,
+      base_url: mainForm.base_url.trim() || undefined,
+      model: mainForm.model.trim() || undefined,
+    };
+    const score: LlmSlotUpdate = {
+      api_key: scoreForm.api_key.trim() || undefined,
+      base_url: scoreForm.base_url.trim() || undefined,
+      model: scoreForm.model.trim() || undefined,
+    };
+    if (!main.api_key && !main.base_url && !main.model && !score.api_key && !score.base_url && !score.model) {
+      message.warning("请至少填写一项配置");
+      return;
+    }
+    setKeysSaving(true);
+    try {
+      const data = await api.updateSettingsKeys({ main, score });
+      setKeysStatus(data);
+      setMainForm((f) => ({ ...f, api_key: "" }));
+      setScoreForm((f) => ({ ...f, api_key: "" }));
+      message.success("配置已更新，立即生效");
+    } catch (err) {
+      message.error("更新配置失败，请稍后重试");
+      console.error("更新配置出错:", err);
+    }
+    setKeysSaving(false);
+  };
+
   // ── JD 解析（手动触发） ──
   const analyzeJd = async () => {
     if (!jdText.trim()) {
@@ -343,10 +436,17 @@ export default function Home() {
         setJdParsed(result.parsed);
         message.success("JD 解析成功！");
       } else {
-        message.error("JD 解析失败，请检查内容后重试");
+        message.error(
+          result.error ? `JD 解析失败：${result.error}` : "JD 解析失败，请检查内容后重试"
+        );
       }
     } catch (err) {
-      message.error("JD 解析失败，请检查网络或稍后重试");
+      const detail = err instanceof Error ? err.message : "";
+      message.error(
+        detail
+          ? `JD 解析失败：${detail}（可在侧边栏「设置」里检查提供商/Key）`
+          : "JD 解析失败，请检查网络或稍后重试"
+      );
       console.error("JD 解析出错:", err);
     }
     setJdLoading(false);
@@ -360,10 +460,11 @@ export default function Home() {
         message.error(result.error);
       } else {
         setJdText(result.content);
+        setJdParsed(null); // JD 已变更，旧解析结果失效，必须重新解析
         message.success("JD 文件已上传，请点击「解析 JD」按钮");
       }
-    } catch {
-      message.error("JD 文件读取失败");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "JD 文件读取失败");
     }
   };
 
@@ -455,6 +556,8 @@ export default function Home() {
   };
 
   // ── 发送回答（流式输出） ──
+  const streamAbortRef = useRef<AbortController | null>(null);
+
   const handleSend = async (isFinished = false) => {
     if (!inputValue.trim() && !isFinished) return;
     const answer = isFinished ? "我想结束了" : inputValue.trim();
@@ -471,12 +574,19 @@ export default function Home() {
     setInputValue("");
     setLoading(true);
 
+    streamAbortRef.current?.abort(); // 切换/重发前先中断旧流
+    const abort = new AbortController();
+    streamAbortRef.current = abort;
+
     try {
-      const stream = api.interviewChatStream({
-        session_id: sessionId,
-        answer,
-        is_finished: isFinished,
-      });
+      const stream = api.interviewChatStream(
+        {
+          session_id: sessionId,
+          answer,
+          is_finished: isFinished,
+        },
+        abort.signal
+      );
 
       let fullReply = "";
       for await (const chunk of stream) {
@@ -518,7 +628,8 @@ export default function Home() {
           });
         }
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
       message.error("发送失败");
     }
     setLoading(false);
@@ -533,6 +644,16 @@ export default function Home() {
     try {
       const data = await api.getSessionMessages(sid);
       const filtered = data.messages.filter((m) => m.content !== "（面试开始，候选人准备回答）");
+
+      // 优先用落库报告（权威来源，无需从消息里猜 JSON）
+      const saved = await api.getReport(sid);
+      if (saved.report && typeof saved.report === "object" && "score" in saved.report) {
+        setReport(saved.report);
+        setStep("report");
+        setMessages(filtered.slice(0, -1) as Message[]);
+        setLoading(false);
+        return;
+      }
 
       const lastMsg = filtered[filtered.length - 1];
       let isReport = false;
@@ -594,6 +715,7 @@ export default function Home() {
 
   // ── 新面试 ──
   const handleReset = () => {
+    streamAbortRef.current?.abort(); // 中断进行中的流式请求
     setStep("upload");
     setMessages([]);
     setReport(null);
@@ -608,6 +730,61 @@ export default function Home() {
   // ── 过滤会话列表 ──
   const filteredSessions = sessions.filter((s) =>
     searchQuery ? s.name.toLowerCase().includes(searchQuery.toLowerCase()) : true
+  );
+
+  // 设置弹窗：单个插槽的表单渲染（提供商/地址/模型/Key）
+  const renderSlotFields = (
+    title: string,
+    desc: string,
+    form: SlotForm,
+    setForm: Dispatch<SetStateAction<SlotForm>>,
+    status: LlmSlotSettings | undefined
+  ) => (
+    <div>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        {title}
+        {status?.api_key_set && (
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+            当前：{status.api_key_masked}
+          </Text>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Select
+          value={form.provider || undefined}
+          placeholder="提供商"
+          style={{ width: 130, flexShrink: 0 }}
+          onChange={(v) => applyPreset(form, setForm, v)}
+          options={[
+            { value: "MiMo", label: "MiMo" },
+            { value: "DeepSeek", label: "DeepSeek" },
+            { value: "OpenAI", label: "OpenAI" },
+            { value: "自定义", label: "自定义" },
+          ]}
+        />
+        <Input
+          placeholder="Base URL（chat/completions 地址）"
+          value={form.base_url}
+          onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+        />
+      </div>
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <Input
+          placeholder="模型名"
+          value={form.model}
+          onChange={(e) => setForm({ ...form, model: e.target.value })}
+        />
+        <Input.Password
+          placeholder={status?.api_key_set ? "新 Key（留空不修改）" : "API Key"}
+          value={form.api_key}
+          onChange={(e) => setForm({ ...form, api_key: e.target.value })}
+          autoComplete="off"
+        />
+      </div>
+      <div style={{ fontSize: 12, color: "var(--color-text-secondary)", marginTop: 4 }}>
+        {desc}
+      </div>
+    </div>
   );
 
   return (
@@ -639,6 +816,8 @@ export default function Home() {
         style={{
           width: isMobile ? (sidebarOpen ? 260 : 0) : 260,
           padding: sidebarOpen || !isMobile ? "20px 16px" : 0,
+          display: "flex",
+          flexDirection: "column",
           overflowY: "auto",
           flexShrink: 0,
           transition: "all 250ms ease",
@@ -726,6 +905,19 @@ export default function Home() {
                 没有匹配的面试
               </div>
             )}
+
+            {/* 设置入口（API Key） */}
+            <div style={{ marginTop: "auto", paddingTop: 16 }}>
+              <Button
+                type="text"
+                block
+                icon={<SettingOutlined />}
+                className="sidebar-settings-btn"
+                onClick={openSettings}
+              >
+                设置
+              </Button>
+            </div>
           </>
         )}
       </div>
@@ -837,7 +1029,10 @@ export default function Home() {
                   rows={3}
                   placeholder="或直接粘贴岗位描述..."
                   value={jdText}
-                  onChange={(e) => setJdText(e.target.value)}
+                  onChange={(e) => {
+                    setJdText(e.target.value);
+                    setJdParsed(null); // JD 文本变更 → 旧解析结果作废
+                  }}
                   style={{ borderRadius: "var(--radius-input)", resize: "vertical" }}
                 />
                 
@@ -938,7 +1133,7 @@ export default function Home() {
                 </div>
               }
               extra={
-                <Button danger icon={<StopOutlined />} onClick={() => handleSend(true)}>
+                <Button danger icon={<StopOutlined />} onClick={() => handleSend(true)} disabled={loading}>
                   结束面试
                 </Button>
               }
@@ -1147,6 +1342,34 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      {/* ─── 模型提供商设置弹窗 ─── */}
+      <Modal
+        title="模型提供商设置"
+        open={settingsOpen}
+        onCancel={() => setSettingsOpen(false)}
+        onOk={handleSaveKeys}
+        okText="保存"
+        cancelText="取消"
+        confirmLoading={keysSaving}
+      >
+        <Space direction="vertical" size="middle" style={{ width: "100%", marginTop: 8 }}>
+          {renderSlotFields(
+            "追问 / 解析（Agent 追问、简历/JD 解析）",
+            "选择提供商会自动填充地址和模型；Key 与该插槽绑定保存，不会串到别的提供商",
+            mainForm,
+            setMainForm,
+            keysStatus?.main
+          )}
+          {renderSlotFields(
+            "评分（面试结束生成报告）",
+            "选择提供商会自动填充地址和模型；未配置 Key 时回退到追问/解析插槽",
+            scoreForm,
+            setScoreForm,
+            keysStatus?.score
+          )}
+        </Space>
+      </Modal>
     </div>
   );
 }

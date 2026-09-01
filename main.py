@@ -8,10 +8,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 from PyPDF2 import PdfReader
 from docx import Document
+
+from prompts import SYSTEM_INTERVIEWER, build_followup_prompt, build_report_prompt
 
 # 加载 .env 文件里的环境变量
 load_dotenv()
@@ -24,22 +26,83 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 if not LLM_API_KEY:
     raise ValueError("未找到 LLM_API_KEY，请检查 .env 文件")
 
-# 评分模型（双模型架构：追问用 MiMo，评分用 DeepSeek，v1 评估证明 qwen 系判分更准）
+# 追问/解析插槽（默认 MiMo）：地址、模型、Key 一起配置，避免 Key 与提供商不匹配
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.xiaomimimo.com/v1/chat/completions")
+LLM_MODEL = os.getenv("LLM_MODEL", "mimo-v2.5-pro")
+
+# 评分插槽（默认 DeepSeek）：地址、模型、Key 一起配置
 SCORE_MODEL = os.getenv("SCORE_MODEL", "deepseek-v4-flash-vision-exp")
 SCORE_BASE_URL = os.getenv("SCORE_BASE_URL", "https://api.deepseek.com/v1/chat/completions")
 
+# 内置提供商预设（选项 → 地址 + 模型）
+LLM_PROVIDER_PRESETS = {
+    "MiMo": {
+        "base_url": "https://api.xiaomimimo.com/v1/chat/completions",
+        "model": "mimo-v2.5-pro",
+    },
+    "DeepSeek": {
+        "base_url": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-v4-flash-vision-exp",
+    },
+    "OpenAI": {
+        "base_url": "https://api.openai.com/v1/chat/completions",
+        "model": "gpt-4o-mini",
+    },
+}
+
+
+def provider_of(base_url: str) -> str:
+    """从 base_url 判断提供商预设，匹配不到返回「自定义」"""
+    for name, preset in LLM_PROVIDER_PRESETS.items():
+        if preset["base_url"] == base_url:
+            return name
+    return "自定义"
+
+
+# ═══════════════════════════════════════════════════════
+#  API Key 运行时更新：设置入口改 Key，立即生效且无需重启
+#  调用函数在请求时读取全局变量，因此直接赋值即可生效
+# ═══════════════════════════════════════════════════════
+
+
+def mask_key(key: str) -> str | None:
+    """把 Key 脱敏（sk-****xxxx），未配置返回 None"""
+    if not key:
+        return None
+    if len(key) <= 8:
+        return key[:2] + "****"
+    return f"{key[:6]}****{key[-4:]}"
+
+
+def save_env_setting(key_name: str, value: str) -> None:
+    """把配置项写回 .env（保留其他行），重启后依然生效。"""
+    env_path = ".env"
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    prefix = f"{key_name}="
+    for i, line in enumerate(lines):
+        if line.strip().startswith(prefix):
+            lines[i] = f"{key_name}={value}"
+            break
+    else:
+        lines.append(f"{key_name}={value}")
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
 
 async def call_llm(messages: list, timeout: float = 120.0) -> str:
-    """调用 MiMo LLM，返回文字回复。"""
+    """调用追问/解析插槽的 LLM（默认 MiMo），返回文字回复。"""
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "https://api.xiaomimimo.com/v1/chat/completions",
+            LLM_BASE_URL,
             headers={
                 "Authorization": f"Bearer {LLM_API_KEY}",
                 "Content-Type": "application/json"
             },
             json={
-                "model": "mimo-v2.5-pro",
+                "model": LLM_MODEL,
                 "messages": messages
             },
             timeout=timeout
@@ -171,24 +234,45 @@ AGENT_TOOLS = [
 
 
 def tool_search_resume(keyword: str, resume_text: str) -> str:
-    """从简历中搜索包含关键词的段落"""
+    """从简历中搜索包含关键词的段落（去换行匹配，避免 PDF 断行/截断导致漏检）"""
     if not resume_text:
         return "简历内容为空，无法搜索。"
-    if not keyword or not keyword.strip():
+    kw = (keyword or "").strip().lower()
+    if not kw:
         return "关键词为空，无法搜索。请提供具体的项目名或技术名。"
-    # 按行分割，找包含关键词的行及其上下文
-    lines = resume_text.split("\n")
+
+    # 构建"去换行"后的全文 + 原文索引映射：跨行关键词（如"秒杀系\n统"）也能命中
+    flat_chars = []
+    orig_index = []  # orig_index[i] = flat 第 i 个字符在原文中的下标
+    for i, ch in enumerate(resume_text):
+        if ch in "\r\n":
+            continue
+        flat_chars.append(ch.lower())
+        orig_index.append(i)
+    flat = "".join(flat_chars)
+
+    def _context(orig_start: int, orig_end: int) -> str:
+        # 关键词原文保持连续（方便模型识别），命中标记放在段落开头
+        matched_text = resume_text[orig_start:orig_end]
+        left = resume_text[max(0, orig_start - 120):orig_start]
+        right = resume_text[orig_end:orig_end + 120]
+        return ("〔命中〕" + left + matched_text + right).strip()
+
     matched = []
-    for i, line in enumerate(lines):
-        if keyword.lower() in line.lower():
-            # 取匹配行及前后各 1 行作为上下文
-            start = max(0, i - 1)
-            end = min(len(lines), i + 2)
-            context = "\n".join(lines[start:end])
-            matched.append(context)
+    pos = flat.find(kw)
+    while pos != -1 and len(matched) < 3:
+        orig_start = orig_index[pos]
+        orig_end = orig_index[pos + len(kw) - 1] + 1
+        matched.append(_context(orig_start, orig_end))
+        pos = flat.find(kw, pos + 1)
+
     if matched:
-        return f"找到 {len(matched)} 处匹配「{keyword}」：\n" + "\n---\n".join(matched[:3])
-    return f"简历中未找到与「{keyword}」相关的内容。"
+        return f"找到 {len(matched)} 处匹配「{keyword}」：\n" + "\n---\n".join(matched)
+    return (
+        f"未找到与「{keyword}」完全匹配的段落。"
+        "注意：未找到只代表关键词与简历原文写法不一致，不代表简历中不存在该项目；"
+        "请基于候选人已说出的内容继续追问，不要断言其不存在。"
+    )
 
 
 def tool_evaluate_answer(answer: str, criteria: str) -> str:
@@ -306,13 +390,13 @@ async def call_llm_with_tools(messages: list, tools: list = None,
     tool_calls_log = []
 
     for _ in range(5):
-        payload = {"model": "mimo-v2.5-pro", "messages": messages}
+        payload = {"model": LLM_MODEL, "messages": messages}
         if tools:
             payload["tools"] = tools
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                "https://api.xiaomimimo.com/v1/chat/completions",
+                LLM_BASE_URL,
                 headers={
                     "Authorization": f"Bearer {LLM_API_KEY}",
                     "Content-Type": "application/json"
@@ -361,9 +445,37 @@ async def call_llm_with_tools(messages: list, tools: list = None,
                 result_text = f"未知工具：{func_name}"
 
             tool_calls_log.append({"tool": func_name, "args": func_args, "result": result_text[:200]})
-            messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_text})
+            # 工具结果是给模型的"后台材料"：明确标记严禁输出，防止模型把检索原文复述给候选人
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": f"【后台检索材料·仅供你生成追问参考，严禁把原文输出给候选人】\n{result_text}",
+            })
 
     return {"content": messages[-1].get("content", "（工具调用超限）"), "tool_calls_log": tool_calls_log}
+
+
+async def _guard_agent_reply(agent_messages: list, final_reply: str) -> str:
+    """兜底：模型若把检索材料原样复述成回复（含〔命中〕标记），纠正重试一次"""
+    if not final_reply or "〔命中〕" not in final_reply:
+        return final_reply
+    retry_messages = agent_messages + [
+        {"role": "assistant", "content": final_reply},
+        {
+            "role": "user",
+            "content": (
+                "你刚才把后台检索材料原样输出给了候选人。请忽略上面的引用，"
+                "只输出基于该材料生成的追问（1-2 句话），必须是你自己组织的语言，不要复述材料原文。"
+            ),
+        },
+    ]
+    try:
+        retry = await call_llm(retry_messages, timeout=60)
+    except HTTPException:
+        return final_reply  # 兜底失败时保持原回复，宁可提示错误也不要静默丢失
+    if retry and "〔命中〕" not in retry:
+        return retry
+    return final_reply
 
 
 app = FastAPI()
@@ -375,6 +487,65 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class SlotSettings(BaseModel):
+    """单个 LLM 插槽的设置（留空的字段表示不修改）"""
+    api_key: str = ""    # 该插槽的 API Key
+    base_url: str = ""   # OpenAI 兼容的 chat/completions 地址
+    model: str = ""      # 模型名
+
+
+class UpdateKeysRequest(BaseModel):
+    main: SlotSettings = Field(default_factory=SlotSettings)   # 追问/解析插槽（默认 MiMo）
+    score: SlotSettings = Field(default_factory=SlotSettings)  # 评分插槽（默认 DeepSeek）
+
+
+def _slot_status(base_url: str, model: str, api_key: str) -> dict:
+    """生成单个插槽的状态描述（Key 脱敏）"""
+    return {
+        "provider": provider_of(base_url),
+        "base_url": base_url,
+        "model": model,
+        "api_key_masked": mask_key(api_key),
+        "api_key_set": bool(api_key),
+    }
+
+
+@app.get("/settings/keys")
+async def get_settings_keys():
+    """返回两个插槽的当前配置（Key 脱敏），供设置页展示"""
+    return {
+        "main": _slot_status(LLM_BASE_URL, LLM_MODEL, LLM_API_KEY),
+        "score": _slot_status(SCORE_BASE_URL, SCORE_MODEL, DEEPSEEK_API_KEY),
+    }
+
+
+@app.post("/settings/keys")
+async def update_settings_keys(req: UpdateKeysRequest):
+    """更新插槽配置：Key/地址/模型与插槽绑定保存，立即生效并写回 .env（重启后保留）"""
+    global LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, DEEPSEEK_API_KEY, SCORE_BASE_URL, SCORE_MODEL
+
+    m, s = req.main, req.score
+    if m.api_key.strip():
+        LLM_API_KEY = m.api_key.strip()
+        save_env_setting("LLM_API_KEY", m.api_key.strip())
+    if m.base_url.strip():
+        LLM_BASE_URL = m.base_url.strip()
+        save_env_setting("LLM_BASE_URL", m.base_url.strip())
+    if m.model.strip():
+        LLM_MODEL = m.model.strip()
+        save_env_setting("LLM_MODEL", m.model.strip())
+    if s.api_key.strip():
+        DEEPSEEK_API_KEY = s.api_key.strip()
+        save_env_setting("DEEPSEEK_API_KEY", s.api_key.strip())
+    if s.base_url.strip():
+        SCORE_BASE_URL = s.base_url.strip()
+        save_env_setting("SCORE_BASE_URL", s.base_url.strip())
+    if s.model.strip():
+        SCORE_MODEL = s.model.strip()
+        save_env_setting("SCORE_MODEL", s.model.strip())
+    return await get_settings_keys()
 
 
 @app.get("/")
@@ -523,8 +694,14 @@ async def start_interview(req: InterviewStartRequest):
     return {"first_question": first_question, "resume_parsed": True}
 
 
-def build_jd_directive(jd_parsed: dict | None, jd_text: str) -> str:
+def build_jd_directive(jd_parsed, jd_text: str) -> str:
     """根据解析后的 JD 生成确定性面试指令（无 LLM 调用）"""
+    # jd_parsed 可能是 dict（内存）或 JSON 字符串（数据库），统一成 dict
+    if isinstance(jd_parsed, str):
+        try:
+            jd_parsed = json.loads(jd_parsed)
+        except (json.JSONDecodeError, TypeError):
+            jd_parsed = None
     if not jd_parsed:
         return jd_text[:500] or "通用技术岗"
     
@@ -576,6 +753,16 @@ def init_db():
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                report TEXT NOT NULL,
+                raw TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -637,11 +824,39 @@ def list_sessions() -> list:
 
 
 def delete_session(session_id: str):
-    """删除一场面试（连带它的所有消息）"""
+    """删除一场面试（连带它的所有消息和评分报告）"""
     with _db_lock:
         _db_conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        _db_conn.execute("DELETE FROM reports WHERE session_id = ?", (session_id,))
         _db_conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         _db_conn.commit()
+
+
+def save_report(session_id: str, report: dict, raw: str):
+    """保存一场面试的评分报告（含解析失败的原始回复），报告落库供历史回看/审计"""
+    with _db_lock:
+        _db_conn.execute(
+            "INSERT INTO reports (session_id, report, raw) VALUES (?, ?, ?) "
+            "ON CONFLICT(session_id) DO UPDATE SET report = excluded.report, raw = excluded.raw",
+            (session_id, json.dumps(report, ensure_ascii=False), raw[:5000]),
+        )
+        _db_conn.commit()
+
+
+def get_report(session_id: str) -> dict | None:
+    """读取一个会话的落库报告：返回 {"report": dict|None, "raw": str}；没有返回 None"""
+    with _db_lock:
+        row = _db_conn.execute(
+            "SELECT report, raw FROM reports WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        report = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        report = None
+    return {"report": report, "raw": row[1] or ""}
 
 
 def get_session_info(session_id: str) -> dict | None:
@@ -812,6 +1027,7 @@ async def analyze_jd(req: AnalyzeJdRequest):
 class StartInterviewRequest(BaseModel):
     resume_text: str   # 简历纯文本
     jd_text: str = ""  # 岗位描述
+    jd_parsed: dict | None = None  # JD 结构化解析结果（from /analyze-jd）
     session_id: str = ""  # 留空则自动生成
     candidate_name: str = "候选人"  # 候选人名字，用于称呼
 
@@ -822,12 +1038,13 @@ async def interview_start(req: StartInterviewRequest):
     # 没有 session_id 就自动生成
     session_id = req.session_id or f"interview-{uuid.uuid4().hex[:8]}"
 
-    # 存会话信息（简历、JD 都存进 sessions 表）
+    # 存会话信息（完整简历供 Agent 搜索、JD 结构化结果供 build_jd_directive 使用）
     create_session(
         session_id=session_id,
         name=f"{req.candidate_name} - 面试",
         jd_text=req.jd_text[:1000],
-        resume_text=req.resume_text[:3000],
+        resume_text=req.resume_text,  # 存全文：搜索工具要用原文，截断会导致真实项目搜不到
+        jd_parsed=json.dumps(req.jd_parsed, ensure_ascii=False) if req.jd_parsed else None,
     )
 
     # 让 AI 生成：开场白 + 第一个问题
@@ -889,37 +1106,7 @@ async def interview_chat(req: InterviewChatRequest):
         history = history + [{"role": "user", "content": req.answer}]
         # 候选人想结束：输出结构化评分报告
         jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
-        prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
-
-【重要铁律】
-- 评分和优点必须严格基于候选人在面试对话中的实际表现，不能凭简历推测
-- 如果候选人全程没有展示任何技术能力或有效回答，相关维度应打低分，优点应如实反映实际情况（如"态度坦诚"），不能编造未展示的能力
-- 简历仅供参考，不代表面试中的真实表现
-
-【评分尺度（严格按此锚点打分，不要整体压分）】
-- 85-100：有原理、有具体数据、有踩坑复盘，追问时展开充分
-- 70-85：回答扎实，有技术原理或较深入的实践细节
-- 55-70：基本答对但深度一般，展开有限
-- 40-55：回答过于简单，只有结论没有过程
-- 20-40：含糊、答非所问或回避问题
-- 0-20：坦承不懂、几乎无有效内容
-
-【岗位面试指令】{jd_directive}
-【面试历史】
-{format_history(history)}
-
-【输出格式】
-{{
-  "score": {{
-    "technical": 0,
-    "communication": 0,
-    "logic": 0
-  }},
-  "strengths": ["优点1", "优点2", "优点3"],
-  "improvements": ["不足1", "不足2"],
-  "overall_comment": "综合评语（3句话）"
-}}
-评分都是 0-100 的整数。只输出 JSON，不要输出其他文字。"""
+        prompt = build_report_prompt(jd_directive, format_history(history))
     else:
         # 上下文管理：对话超过 6 轮时压缩早期历史
         if len(history) > 6:
@@ -929,45 +1116,10 @@ async def interview_chat(req: InterviewChatRequest):
             history_text = format_history(history[-6:])
 
         jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
-        prompt = f"""【岗位面试指令】{jd_directive}
-
-【面试历史】
-{history_text}
-
-【候选人本轮回答】
-{req.answer}
-
-请执行以下步骤：
-
-第 1 步：从候选人回答中提取关键词（项目名、技术名词、具体数字）
-第 2 步：用 search_resume 工具搜索简历中对应的细节
-第 3 步：根据搜索结果，按下方决策树生成回复
-
-【决策树】
-A. 搜索命中简历细节 → 基于细节追问（问实现原理、踩过的坑、量化数据）
-B. 搜索未命中 → 基于候选人回答本身追问（问思路、权衡、替代方案）
-C. 候选人回答已经很充分（有原理+有数据+有反思）→ 必须先调用 get_interview_plan 拿到下一阶段方向，再按 next_direction 出题（不得跳过工具直接问）
-D. 候选人明确表示不了解 → 不追问该点，换一个方向
-
-【工具纪律】
-- 每次回复前先检查是否需要调用工具；需要 get_interview_plan 时先调用再输出
-- 禁止在 C 分支跳过 get_interview_plan 直接编一个"新话题"
-
-【追问风格】
-- 引用候选人原话中的关键词，让他知道你在听
-- 问"怎么做的"而不是"是不是做的"
-- 一次只问一个问题，不要连问
-
-【输出】
-- 直接输出追问内容，1-2 句话，不寒暄、不夸奖
-- 不要编造简历中不存在的项目或技术细节"""
+        prompt = build_followup_prompt(jd_directive, history_text, req.answer)
 
     messages = [
-        {"role": "system", "content": (
-            "你是一位资深技术面试官。你的目标是通过追问判断候选人的真实技术水平。"
-            "风格：专业、直接、不刁难。不要说'很好的回答'之类的客套话。"
-            "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。"
-        )},
+        {"role": "system", "content": SYSTEM_INTERVIEWER},
         {"role": "user", "content": prompt},
     ]
 
@@ -990,20 +1142,21 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
             messages, tools=AGENT_TOOLS, resume_text=resume_text,
             jd_skills=jd_skills
         )
-        ai_reply = result["content"]
+        ai_reply = await _guard_agent_reply(messages, result["content"])
         tool_calls_log = result["tool_calls_log"]
 
     # LLM 成功后再存消息（避免 LLM 失败时留下孤儿数据）
     save_message(req.session_id, "user", req.answer)
     save_message(req.session_id, "assistant", ai_reply)
 
-    # 结束面试时，解析评分报告 JSON
+    # 结束面试时，解析评分报告 JSON 并落库（报告来源可审计，历史回看不依赖消息解析）
     if req.is_finished:
         cleaned = ai_reply.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         try:
             report = json.loads(cleaned)
         except json.JSONDecodeError:
             report = None
+        save_report(req.session_id, report if report else {"_parse_failed": True}, ai_reply)
         return {
             "session_id": req.session_id,
             "ai": ai_reply,
@@ -1033,28 +1186,7 @@ async def interview_chat_stream(req: InterviewChatRequest):
     if req.is_finished:
         history = history + [{"role": "user", "content": req.answer}]
         jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
-        prompt = f"""面试已结束。请根据整场对话输出一份 JSON 面试报告。
-
-【重要铁律】
-- 评分和优点必须严格基于候选人在面试对话中的实际表现，不能凭简历推测
-- 如果候选人全程没有展示任何技术能力或有效回答，相关维度应打低分，优点应如实反映实际情况（如"态度坦诚"），不能编造未展示的能力
-- 简历仅供参考，不代表面试中的真实表现
-
-【评分尺度（严格按此锚点打分，不要整体压分）】
-- 85-100：有原理、有具体数据、有踩坑复盘，追问时展开充分
-- 70-85：回答扎实，有技术原理或较深入的实践细节
-- 55-70：基本答对但深度一般，展开有限
-- 40-55：回答过于简单，只有结论没有过程
-- 20-40：含糊、答非所问或回避问题
-- 0-20：坦承不懂、几乎无有效内容
-
-【岗位面试指令】{jd_directive}
-【面试历史】
-{format_history(history)}
-
-【输出格式】
-{{"score": {{"technical": 0, "communication": 0, "logic": 0}}, "strengths": ["优点1","优点2","优点3"], "improvements": ["不足1","不足2"], "overall_comment": "综合评语（3句话）"}}
-评分都是 0-100 的整数。只输出 JSON，不要输出其他文字。"""
+        prompt = build_report_prompt(jd_directive, format_history(history))
     else:
         # 上下文管理：对话超过 6 轮时压缩早期历史
         if len(history) > 6:
@@ -1064,37 +1196,7 @@ async def interview_chat_stream(req: InterviewChatRequest):
             history_text = format_history(history[-6:])
 
         jd_directive = build_jd_directive(session_info.get("jd_parsed"), jd_text)
-        prompt = f"""【岗位面试指令】{jd_directive}
-
-【面试历史】
-{history_text}
-【候选人本轮回答】
-{req.answer}
-
-请执行以下步骤：
-
-第 1 步：从候选人回答中提取关键词（项目名、技术名词、具体数字）
-第 2 步：用 search_resume 工具搜索简历中对应的细节
-第 3 步：根据搜索结果，按下方决策树生成回复
-
-【决策树】
-A. 搜索命中简历细节 → 基于细节追问（问实现原理、踩过的坑、量化数据）
-B. 搜索未命中 → 基于候选人回答本身追问（问思路、权衡、替代方案）
-C. 候选人回答已经很充分（有原理+有数据+有反思）→ 必须先调用 get_interview_plan 拿到下一阶段方向，再按 next_direction 出题（不得跳过工具直接问）
-D. 候选人明确表示不了解 → 不追问该点，换一个方向
-
-【工具纪律】
-- 每次回复前先检查是否需要调用工具；需要 get_interview_plan 时先调用再输出
-- 禁止在 C 分支跳过 get_interview_plan 直接编一个"新话题"
-
-【追问风格】
-- 引用候选人原话中的关键词，让他知道你在听
-- 问"怎么做的"而不是"是不是做的"
-- 一次只问一个问题，不要连问
-
-【输出】
-- 直接输出追问内容，1-2 句话，不寒暄、不夸奖
-- 不要编造简历中不存在的项目或技术细节"""
+        prompt = build_followup_prompt(jd_directive, history_text, req.answer)
 
     # 结束面试走评分模型；否则 Agent 模式带工具调用
     if req.is_finished:
@@ -1102,7 +1204,7 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
             {"role": "system", "content": (
                 "你是一位资深技术面试官。你的目标是通过追问判断候选人的真实技术水平。"
                 "风格：专业、直接、不刁难。不要说'很好的回答'之类的客套话。"
-                "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。"
+                "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。搜索未命中时不得断言某项目/技术不存在，必要时可向候选人求证。"
             )},
             {"role": "user", "content": prompt},
         ]
@@ -1113,7 +1215,7 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
             {"role": "system", "content": (
                 "你是一位资深技术面试官。你的目标是通过追问判断候选人的真实技术水平。"
                 "风格：专业、直接、不刁难。不要说'很好的回答'之类的客套话。"
-                "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。"
+                "铁律：只能基于候选人的实际回答和简历内容提问，不能编造候选人没有提到的细节。搜索未命中时不得断言某项目/技术不存在，必要时可向候选人求证。"
             )},
             {"role": "user", "content": prompt},
         ]
@@ -1132,12 +1234,21 @@ D. 候选人明确表示不了解 → 不追问该点，换一个方向
             agent_messages, tools=AGENT_TOOLS, resume_text=resume_text,
             jd_skills=jd_skills
         )
-        final_reply = agent_result["content"]
+        final_reply = await _guard_agent_reply(agent_messages, agent_result["content"])
         tool_calls_log = agent_result["tool_calls_log"]
 
     # LLM 成功后再存消息
     save_message(req.session_id, "user", req.answer)
     save_message(req.session_id, "assistant", final_reply)
+
+    # 结束面试时：解析评分报告 JSON 并落库
+    if req.is_finished:
+        cleaned = final_reply.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        try:
+            report = json.loads(cleaned)
+        except json.JSONDecodeError:
+            report = None
+        save_report(req.session_id, report if report else {"_parse_failed": True}, final_reply)
 
     # 流式推送给前端（按词推送，比逐字符高效）
     async def generate():
@@ -1156,3 +1267,12 @@ async def get_session_messages(session_id: str):
     """获取某场面试的所有消息"""
     history = load_history(session_id, max_turns=100)
     return {"session_id": session_id, "messages": history}
+
+
+@app.get("/sessions/{session_id}/report")
+async def get_session_report(session_id: str):
+    """读取落库的评分报告（用于历史回看，避免再从消息里猜 JSON）"""
+    result = get_report(session_id)
+    if result is None:
+        return {"session_id": session_id, "report": None, "raw": None}
+    return {"session_id": session_id, **result}

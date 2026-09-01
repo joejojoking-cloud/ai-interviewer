@@ -88,13 +88,14 @@ LLM 基于简历细节生成追问：
 —— 若回答已充分，则改调 get_interview_plan 按 JD 技能优先级推进下一话题
 ```
 
-### 追问决策树
+### 追问决策树（A-E 五分支，定义见 `prompts.py` 单源文件）
 
 ```
-搜索命中简历细节 → 基于细节追问（问实现原理、踩过的坑、量化数据）
-搜索未命中       → 基于回答本身追问（问思路、权衡、替代方案）
-回答已经很充分   → 调用 get_interview_plan 按 JD 必考技能推进下一阶段
-候选人不了解     → 不追问该点，换一个方向
+A. 搜索命中简历细节 → 基于细节追问（问实现原理、踩过的坑、量化数据）
+B. 搜索未命中       → 基于回答本身追问（问思路、权衡、替代方案）；未命中≠不存在，禁止断言
+C. 回答已经很充分   → 必须先调用 get_interview_plan，按下一阶段方向出题（不得跳过）
+D. 候选人不了解     → 不追问该点，换一个方向
+E. 回答与问题无关（寒暄/"你好"）→ 友好提醒并重申问题，不强行解读、不下结论
 ```
 
 ---
@@ -188,16 +189,18 @@ npm run dev
 
 ```
 ai-interviewer/
-├── main.py              # FastAPI 主程序（15 个接口 + 4 工具 Agent + JD 指令）
+├── main.py              # FastAPI 主程序（17 个接口：含 /settings/keys ×2 + 报告查询；4 工具 Agent + JD 指令）
+├── prompts.py           # Prompt 单源文件（决策树/铁律/评分锚点；chat 与 chat-stream 共用）
 ├── .env                 # API Key（不提交）
-├── interviewer.db       # SQLite 数据库（不提交）
+├── interviewer.db       # SQLite 数据库：sessions / messages / reports（不提交）
 ├── test_resumes/        # 10 份测试简历
 ├── eval/                # 评估体系（30 场自动化测试）
 │   ├── run_evaluation.py
+│   ├── experience_metrics.py   # 体感代理指标（重复提问率/追问引用率/材料泄漏）
 │   ├── results_v3_final.json
 │   ├── human_scores.csv
 │   └── human_scoring/   # 30 场对话转录（盲评）
-├── tests/               # pytest 测试集（49 用例）
+├── tests/               # pytest 测试集（78 用例）
 ├── test.http            # 接口测试集
 ├── .gitignore
 └── README.md

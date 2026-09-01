@@ -26,8 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402
-
-sys.stdout.reconfigure(encoding="utf-8")
+from experience_metrics import experience_summary  # noqa: E402
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -136,6 +135,7 @@ async def _run_one_interview(resume_text: str, strategy: str, session_id: str, r
             "strengths": report.get("strengths", []),
             "improvements": report.get("improvements", []),
             "overall_comment": report.get("overall_comment", ""),
+            "experience": collect_experience(sid, dialogue),
         }
     except Exception as e:
         return {"resume": "", "strategy": strategy, "error": f"{type(e).__name__}: {e}"}
@@ -144,6 +144,27 @@ async def _run_one_interview(resume_text: str, strategy: str, session_id: str, r
 def run_one_interview(resume_text: str, strategy: str, session_id: str, rounds: int = ANALYSIS_ROUNDS) -> dict:
     """同步包装，内部 asyncio 跑 async 接口"""
     return asyncio.run(_run_one_interview(resume_text, strategy, session_id, rounds))
+
+
+def collect_experience(session_id: str, answers: list[str]) -> dict:
+    """从会话消息里抽取'面试官提问'序列，与候选人回答一起算体感代理指标。
+
+    - 提问：assistant 消息，剔除评分报告 JSON（含 "score"）
+    - 回答：user 消息，剔除开场占位和"结束面试"指令（前者是平台注入，后者不体现回答质量）
+    """
+    msgs = main.load_history(session_id)
+    questions = [
+        m["content"] for m in msgs
+        if m["role"] == "assistant"
+        and '"score"' not in m["content"]
+    ]
+    real_answers = [
+        m["content"] for m in msgs
+        if m["role"] == "user"
+        and m["content"] != "（面试开始，候选人准备回答）"
+        and "答完了" not in m["content"]
+    ]
+    return experience_summary(questions, real_answers)
 
 
 def export_transcript(session_id: str, tag: str, strategy: str):
@@ -222,7 +243,13 @@ def main_run(limit: int, resume: bool, rounds: int = ANALYSIS_ROUNDS, workers: i
                 export_transcript(work["session_id"], work["tag"], work["strategy"])
                 scores = r.get("scores", {})
                 if scores:
-                    print(f"    -> 技术 {scores.get('technical', '-')} | 表达 {scores.get('communication', '-')} | 逻辑 {scores.get('logic', '-')}", flush=True)
+                    exp = r.get("experience", {})
+                    print(
+                        f"    -> 技术 {scores.get('technical', '-')} | 表达 {scores.get('communication', '-')} | 逻辑 {scores.get('logic', '-')}"
+                        f" | 重复提问率 {exp.get('repeated_question_rate', '-')} | 追问引用率 {exp.get('follower_overlap_rate', '-')}"
+                        f" | 材料泄漏 {exp.get('leaked_material_hits', '-')}",
+                        flush=True,
+                    )
                 else:
                     print(f"    -> 失败: {r.get('error', '')}", flush=True)
 
@@ -253,3 +280,17 @@ if __name__ == "__main__":
         }
         print("\n=== 平均分 ===")
         print(json.dumps(avg, ensure_ascii=False, indent=2))
+
+        exps = [r["experience"] for r in ok if r.get("experience")]
+        if exps:
+            exp_avg = {
+                "repeated_question_rate": round(
+                    sum(e["repeated_question_rate"] for e in exps) / len(exps), 3
+                ),
+                "follower_overlap_rate": round(
+                    sum(e["follower_overlap_rate"] for e in exps) / len(exps), 3
+                ),
+                "leaked_material_hits": sum(e["leaked_material_hits"] for e in exps),
+            }
+            print("\n=== 体感代理指标（30 场均值） ===")
+            print(json.dumps(exp_avg, ensure_ascii=False, indent=2))

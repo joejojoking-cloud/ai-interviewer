@@ -2,6 +2,9 @@
 
 > 日期：2026/08/13
 > 目标：优化"追问机制"的 Prompt，让 AI 追问更有针对性
+> 更新（2026-09-01）：追踪 Prompt 已迁至 `prompts.py` 单源（决策树 A-E / 三条铁律 / 6 档评分锚点），
+> chat 与 chat-stream 共用一份定义，双份拷贝漂移已由 tests/test_prompt_consistency.py 拦截；
+> 本轮迭代记录的"最终版"为历史版本，可对照 `prompts.py` 查看当前生效版本。
 
 ---
 

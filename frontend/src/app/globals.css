@@ -225,6 +225,24 @@ a {
   border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+/* 侧边栏为 flex 列布局：子元素不压缩，设置按钮靠 margin-top:auto 钉在底部 */
+.sidebar > * {
+  flex-shrink: 0;
+}
+
+/* 侧边栏「设置」按钮（暗色背景适配） */
+.sidebar-settings-btn {
+  color: var(--sidebar-text-secondary) !important;
+  justify-content: flex-start;
+  padding-left: 12px !important;
+  border-radius: var(--radius-button) !important;
+}
+
+.sidebar-settings-btn:hover {
+  color: var(--sidebar-text-primary) !important;
+  background: rgba(255, 255, 255, 0.08) !important;
+}
+
 .sidebar-logo {
   display: flex;
   align-items: center;

@@ -48,6 +48,26 @@ export interface JdAnalysis {
   bonus: string[];
 }
 
+// ── LLM 插槽设置（追问/解析、评分） ──
+export interface LlmSlotSettings {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key_masked: string | null;
+  api_key_set: boolean;
+}
+
+export interface LlmSettingsResponse {
+  main: LlmSlotSettings;
+  score: LlmSlotSettings;
+}
+
+export interface LlmSlotUpdate {
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+}
+
 // 通用请求函数
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -58,27 +78,56 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// 直连后端的请求函数：LLM 调用要 30 秒以上，Next dev 代理会超时掐断
+// （日志报 socket hang up），必须绕过代理；后端已配置 CORS 允许所有来源
+async function requestDirect<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(`${BACKEND}${path}`, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) {
+    let detail = `请求失败: ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data && data.detail) detail = data.detail;
+    } catch {
+      // 非 JSON 响应，用默认提示
+    }
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 // 后端接口对应的函数
 export const api = {
   // 简历解析
-  parseResume: (file: File) => {
+  parseResume: async (file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return fetch(`${BASE}/parse-resume`, { method: "POST", body: form }).then(
-      (r) => r.json()
-    );
+    const res = await fetch(`${BASE}/parse-resume`, { method: "POST", body: form });
+    if (!res.ok) {
+      let detail = `请求失败: ${res.status}`;
+      try {
+        const data = await res.json();
+        if (data && data.detail) detail = data.detail;
+      } catch {
+        // 非 JSON 响应，保留默认提示
+      }
+      throw new Error(detail);
+    }
+    return res.json();
   },
 
   // 简历 AI 识别
   analyzeResume: (resume_text: string) =>
-    request<{ parsed: ResumeAnalysis }>("/analyze-resume", {
+    requestDirect<{ parsed?: ResumeAnalysis; error?: string }>("/analyze-resume", {
       method: "POST",
       body: JSON.stringify({ resume_text }),
     }),
 
   // JD AI 解析
   analyzeJd: (jd_text: string) =>
-    request<{ parsed: JdAnalysis }>("/analyze-jd", {
+    requestDirect<{ parsed?: JdAnalysis; error?: string }>("/analyze-jd", {
       method: "POST",
       body: JSON.stringify({ jd_text }),
     }),
@@ -90,7 +139,7 @@ export const api = {
     jd_parsed?: JdAnalysis | null;
     candidate_name?: string;
   }) =>
-    request<{ session_id: string; ai_reply: string }>("/interview/start", {
+    requestDirect<{ session_id: string; ai_reply: string }>("/interview/start", {
       method: "POST",
       body: JSON.stringify(data),
     }),
@@ -101,7 +150,7 @@ export const api = {
     answer: string;
     is_finished?: boolean;
   }) =>
-    request<{ session_id: string; ai: string; report?: InterviewReport }>(
+    requestDirect<{ session_id: string; ai: string; report?: InterviewReport }>(
       "/interview/chat",
       {
         method: "POST",
@@ -119,21 +168,42 @@ export const api = {
     ),
 
   // 删除会话
-  deleteSession: (session_id: string) =>
-    fetch(`${BASE}/sessions/${session_id}`, { method: "DELETE" }).then((r) =>
-      r.json()
+  deleteSession: async (session_id: string) => {
+    const res = await fetch(`${BASE}/sessions/${session_id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`删除失败: ${res.status}`);
+    return res.json();
+  },
+
+  // 落库的评分报告（历史回看优先用这个，不用再从消息里猜 JSON）
+  getReport: (session_id: string) =>
+    requestDirect<{ session_id: string; report: InterviewReport | null; raw?: string }>(
+      `/sessions/${session_id}/report`
     ),
 
+  // 当前 LLM 插槽配置（Key 脱敏）
+  getSettingsKeys: () => request<LlmSettingsResponse>("/settings/keys"),
+
+  // 更新插槽配置（未传字段保持不变）
+  updateSettingsKeys: (data: { main?: LlmSlotUpdate; score?: LlmSlotUpdate }) =>
+    request<LlmSettingsResponse>("/settings/keys", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
   // 流式面试对话
-  interviewChatStream: async function* (data: {
-    session_id: string;
-    answer: string;
-    is_finished?: boolean;
-  }) {
+  interviewChatStream: async function* (
+    data: {
+      session_id: string;
+      answer: string;
+      is_finished?: boolean;
+    },
+    signal?: AbortSignal
+  ) {
     const res = await fetch(`${BACKEND}/interview/chat-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
+      signal,
     });
 
     if (!res.ok) {
@@ -147,24 +217,33 @@ export const api = {
     const decoder = new TextDecoder();
     let buffer = "";
 
+    const parseEvent = (block: string) => {
+      // 兼容 SSE 标准 \r\n\r\n 与 \n\n 分隔；坏块跳过，不中断整条流
+      const line = block.trim();
+      if (!line.startsWith("data: ")) return null;
+      try {
+        return JSON.parse(line.slice(6));
+      } catch {
+        return null;
+      }
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n\n");
-      buffer = lines.pop() || "";
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() || ""; // 未到边界的残留块留给下一轮
 
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          try {
-            const parsed = JSON.parse(line.slice(6));
-            yield parsed;
-          } catch {
-            // skip malformed chunks
-          }
-        }
+      for (const block of blocks) {
+        const parsed = parseEvent(block);
+        if (parsed !== null) yield parsed;
       }
     }
+
+    // 收尾 flush：残余块里可能还有一个完整事件
+    const tail = parseEvent(buffer);
+    if (tail !== null) yield tail;
   },
 };
